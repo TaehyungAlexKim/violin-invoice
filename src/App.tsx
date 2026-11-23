@@ -671,47 +671,78 @@ function InvoiceDetail() {
   const [invoice,setInvoice]=useState<Invoice|null>(null); const [students,setStudents]=useState<Student[]>([])
   const [draftStart,setDraftStart]=useState(todayInVancouver()); const [draftEnd,setDraftEnd]=useState(todayInVancouver())
   const [eligible,setEligible]=useState<Lesson[]>([]); const [message,setMessage]=useState(''); const [teacherName,setTeacherName]=useState('')
+  const [previewing,setPreviewing]=useState(false); const [finalizing,setFinalizing]=useState(false); const [downloading,setDownloading]=useState(false)
   useEffect(()=>{if(!supabase||!id)return;(async()=>{
     const [inv,ss,teacher]=await Promise.all([supabase.from('invoices').select('*').eq('id',id).single(),supabase.from('students').select('*'),supabase.from('teacher_settings').select('teacher_name').maybeSingle()])
     setInvoice(inv.data);setStudents(ss.data||[]);setTeacherName(teacher.data?.teacher_name||'')
     if(inv.data){const start=inv.data.period_start,end=inv.data.period_end;setDraftStart(start);setDraftEnd(end)}
   })()},[id])
   async function preview(){if(!supabase||!invoice)return;
+    setPreviewing(true)
+    setMessage('')
     try{parseDateOnly(draftStart);parseDateOnly(draftEnd);if(draftStart>draftEnd){setMessage('The start date must be on or before the end date.');return}
       const {data,error}=await supabase.from('lessons').select('*').eq('student_id',invoice.student_id).gte('lesson_date',draftStart).lte('lesson_date',draftEnd).order('lesson_date').order('id')
       if(error){setMessage(authError(error));return}
-      const claims=await supabase.from('invoice_lesson_claims').select('lesson_id')
-      const claimed=new Set((claims.data||[]).map(c=>c.lesson_id))
+      const {data:claimData,error:claimError}=await supabase.from('invoice_lesson_claims').select('lesson_id')
+      if(claimError){setMessage(authError(claimError));return}
+      const claimed=new Set((claimData||[]).map(c=>c.lesson_id))
       const eligibleLessons=(data||[]).filter(l=>!claimed.has(l.id))
       setEligible(eligibleLessons)
-      const {data:finalized}=await supabase.from('invoices').select('period_start,period_end').eq('student_id',invoice.student_id).eq('status','finalized')
+      const {data:finalized,error:finalizedError}=await supabase.from('invoices').select('period_start,period_end').eq('student_id',invoice.student_id).eq('status','finalized')
+      if(finalizedError){setMessage(authError(finalizedError));return}
       const overlaps=(finalized||[]).some(i=>i.period_start<=draftEnd && i.period_end>=draftStart)
-      setMessage(overlaps?'This period overlaps an existing finalized invoice. Finalization is rejected.':`Preview: ${eligibleLessons.length} eligible lesson(s), ${formatCad(eligibleLessons.reduce((n,l)=>n+l.charge_cents,0))}.`)
-    }catch(error){setMessage(error instanceof Error?error.message:'Unable to preview.')}}
+      if(overlaps)setMessage('This period overlaps an existing finalized invoice. Finalization is rejected.')
+      else if(!eligibleLessons.length)setMessage('No unbilled lessons are available in this date range.')
+      else setMessage(`Preview: ${eligibleLessons.length} eligible lesson(s), ${formatCad(eligibleLessons.reduce((n,l)=>n+l.charge_cents,0))}.`)
+    }catch(error){setMessage(error instanceof Error?error.message:'Unable to preview.')}
+    finally{setPreviewing(false)}}
   useEffect(()=>{if(invoice?.status==='draft')preview()},[invoice])
   async function saveDraft(){if(!supabase||!invoice)return;const {error}=await supabase.from('invoices').update({period_start:draftStart,period_end:draftEnd}).eq('id',invoice.id);setMessage(error?authError(error):'Draft range saved.') }
   async function finalize(){if(!supabase||!invoice)return;if(!teacherName){setMessage('Enter the teacher name in Settings before finalizing.');return}
+    setFinalizing(true)
     setMessage('Finalizing…')
     try{parseDateOnly(draftStart);parseDateOnly(draftEnd)}catch(error){setMessage(error instanceof Error?error.message:'A valid period start and end date are required.');return}
     if(draftStart>draftEnd){setMessage('The start date must be on or before the end date.');return}
     const {data,error}=await supabase.rpc('finalize_invoice',{p_invoice_id:invoice.id,p_period_start:draftStart,p_period_end:draftEnd})
-    if(error){setMessage(/overlap|included|already/i.test(error.message)?'This period or lesson is already included in a finalized invoice.':/start date|valid period/i.test(error.message)?error.message:authError(error));return}
-    await downloadInvoice(data as InvoiceSnapshot)
-    setInvoice({...invoice,status:'finalized',period_start:draftStart,period_end:draftEnd,snapshot_json:data as InvoiceSnapshot,invoice_number:(data as InvoiceSnapshot).invoice.number,issue_date:(data as InvoiceSnapshot).invoice.issueDate})
-    setMessage('Invoice finalized. PDF download started.')
+    if(error){setFinalizing(false);setMessage(/overlap|included|already/i.test(error.message)?'This period or lesson is already included in a finalized invoice.':/start date|valid period/i.test(error.message)?error.message:authError(error));return}
+    const snapshot=data as InvoiceSnapshot
+    setInvoice({...invoice,status:'finalized',period_start:draftStart,period_end:draftEnd,snapshot_json:snapshot,invoice_number:snapshot.invoice.number,issue_date:snapshot.invoice.issueDate})
+    try {
+      await downloadInvoice(snapshot)
+      setMessage('Invoice finalized. PDF download started.')
+    } catch {
+      setMessage('Invoice finalized, but the PDF download failed. Use Download PDF to try again.')
+    } finally {
+      setFinalizing(false)
+    }
   }
   async function deleteDraft(){if(!supabase||!invoice)return;if(!confirm('Delete this draft?'))return;const {error}=await supabase.from('invoices').delete().eq('id',invoice.id);if(error)setMessage(authError(error));else navigate('/invoices')}
+  async function downloadFinalized(){
+    if(!invoice?.snapshot_json)return
+    setDownloading(true)
+    setMessage('')
+    try{
+      await downloadInvoice(invoice.snapshot_json)
+      setMessage('PDF download started.')
+    }catch{
+      setMessage('The PDF could not be downloaded. Check browser download permissions and try again.')
+    }finally{
+      setDownloading(false)
+    }
+  }
   if(!invoice)return <p>Loading invoice…</p>
   const student=students.find(s=>s.id===invoice.student_id)
   if(invoice.status==='finalized'){
     const snapshot=invoice.snapshot_json
-    return <section><h1>Invoice {invoice.invoice_number}</h1><div className="card invoice-detail"><p><strong>Status:</strong> Finalized</p><p><strong>Issue date:</strong> {invoice.issue_date}</p><p><strong>Student:</strong> {student?.name}</p><p><strong>Service period:</strong> {invoice.period_start} – {invoice.period_end}</p>{invoice.finalized_at&&<p><strong>Finalized at:</strong> {invoice.finalized_at}</p>}<p><strong>Schema:</strong> {invoice.snapshot_schema_version??snapshot?.schemaVersion}</p>{snapshot&&<><p><strong>PDF template:</strong> {snapshot.render.templateVersion}</p><p><strong>Renderer:</strong> {snapshot.render.rendererName} {snapshot.render.rendererVersion}</p><p><strong>Font:</strong> {snapshot.render.fontManifest.family}</p><p><strong>Total:</strong> {formatCad(snapshot.totalCents)}</p></>}<p>Finalized invoices cannot be edited. If correction is needed, use a future void or credit workflow.</p>{snapshot&&<button className="primary" onClick={()=>downloadInvoice(snapshot)}>Download PDF</button>}</div></section>
+    return <section><h1>Invoice {invoice.invoice_number}</h1><div className="card invoice-detail"><p><strong>Status:</strong> Finalized</p><p><strong>Issue date:</strong> {invoice.issue_date}</p><p><strong>Student:</strong> {student?.name}</p><p><strong>Service period:</strong> {invoice.period_start} – {invoice.period_end}</p>{invoice.finalized_at&&<p><strong>Finalized at:</strong> {invoice.finalized_at}</p>}<p><strong>Schema:</strong> {invoice.snapshot_schema_version??snapshot?.schemaVersion}</p>{snapshot&&<><p><strong>PDF template:</strong> {snapshot.render.templateVersion}</p><p><strong>Renderer:</strong> {snapshot.render.rendererName} {snapshot.render.rendererVersion}</p><p><strong>Font:</strong> {snapshot.render.fontManifest.family}</p><p><strong>Total:</strong> {formatCad(snapshot.totalCents)}</p></>}<p>Finalized invoices cannot be edited. If correction is needed, use a future void or credit workflow.</p>{snapshot&&<button className="primary" onClick={downloadFinalized} disabled={downloading}>{downloading?'Preparing PDF…':'Download PDF'}</button>}{message&&<p role="status">{message}</p>}</div></section>
   }
   return <section><h1>Invoice draft</h1><div className="form-grid card"><label>Student<select value={invoice.student_id} disabled>{students.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
     <label>Start date<input type="date" value={draftStart} onChange={e=>{setDraftStart(e.target.value);setEligible([])}} /></label>
     <label>End date<input type="date" value={draftEnd} onChange={e=>{setDraftEnd(e.target.value);setEligible([])}} /></label>
-    <div className="actions"><button onClick={preview}>Preview</button><button onClick={saveDraft}>Save draft</button><button className="primary" onClick={finalize} disabled={draftStart>draftEnd||!eligible.length||!teacherName}>Finalize and download</button><button onClick={deleteDraft}>Delete draft</button></div>
+    <div className="actions"><button onClick={preview} disabled={previewing}>{previewing?'Previewing…':'Preview'}</button><button onClick={saveDraft}>Save draft</button><button className="primary" onClick={finalize} disabled={finalizing||draftStart>draftEnd||!eligible.length||!teacherName}>{finalizing?'Finalizing…':'Finalize and download'}</button><button onClick={deleteDraft}>Delete draft</button></div>
   </div>{draftStart>draftEnd&&<p className="error">The start date must be on or before the end date.</p>}
+  {!teacherName&&<p className="error">Enter the teacher name in Settings before finalizing.</p>}
+  {!eligible.length&&!previewing&&<p className="empty">Finalize is disabled because there are no unbilled lessons in the selected date range.</p>}
   {message&&<p role="status">{message}</p>}<h2>Eligible lessons</h2><ul>{eligible.map(l=><li key={l.id}>{l.lesson_date} — {l.minutes} minutes — {formatCad(l.charge_cents)}</li>)}</ul></section>
 }
 

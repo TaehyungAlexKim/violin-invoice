@@ -40,5 +40,17 @@ export async function downloadInvoice(snapshot: InvoiceSnapshot): Promise<void> 
   ;(pdfMake as unknown as { fonts: Record<string, unknown> }).fonts = {
     NotoSansKR: { normal: font.normalFile, bold: font.normalFile, italics: font.normalFile, bolditalics: font.normalFile },
   }
-  pdfMake.createPdf(snapshotToDocument(snapshot)).download(deterministicFilename(snapshot))
+  const blob = await pdfMake.createPdf(snapshotToDocument(snapshot)).getBlob()
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = deterministicFilename(snapshot)
+  anchor.style.display = 'none'
+  document.body.append(anchor)
+  try {
+    anchor.click()
+  } finally {
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+  }
 }
