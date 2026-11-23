@@ -12,7 +12,7 @@ begin
   elsif not exists (select 1 from pg_catalog.pg_extension where extname = 'pgcrypto') then
     create extension pgcrypto with schema extensions;
   end if;
-end $$;
+end; $$;
 
 create table public.app_operators (
   user_id uuid primary key references auth.users(id) on delete cascade
@@ -131,7 +131,7 @@ create table public.invoice_counters (
 
 create or replace function public.set_updated_at()
 returns trigger language plpgsql security definer set search_path = ''
-as $$ begin new.updated_at = now(); return new; end $$;
+as $$ begin new.updated_at = now(); return new; end; $$;
 create trigger students_updated before update on public.students for each row execute function public.set_updated_at();
 create trigger lessons_updated before update on public.lessons for each row execute function public.set_updated_at();
 create trigger invoices_updated before update on public.invoices for each row execute function public.set_updated_at();
@@ -145,7 +145,7 @@ begin
     raise exception using errcode='23514', message='This lesson is included in a finalized invoice and cannot be changed.';
   end;
   return coalesce(new, old);
-end $$;
+end; $$;
 create trigger lessons_immutable_claimed before update or delete on public.lessons
 for each row execute function public.reject_claimed_lesson_mutation();
 
@@ -157,7 +157,7 @@ begin
     raise exception using errcode='23514', message='Finalized invoices are immutable.';
   end;
   return new;
-end $$;
+end; $$;
 create trigger invoices_immutable before update or delete on public.invoices
 for each row execute function public.reject_finalized_invoice_mutation();
 
@@ -334,6 +334,6 @@ begin
     select v_invoice.id, lesson->>'sourceLessonId', v_owner, now()
     from jsonb_array_elements(v_lines) lesson;
   return v_snapshot;
-end $$;
+end; $$;
 revoke execute on function public.finalize_invoice(uuid, date, date) from public, anon, authenticated;
 grant execute on function public.finalize_invoice(uuid, date, date) to authenticated;
