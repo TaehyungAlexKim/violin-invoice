@@ -21,7 +21,10 @@ create table public.app_operators (
 
 create or replace function public.app_is_operator()
 returns boolean language sql stable security definer set search_path = ''
-as $$ select exists (select 1 from public.app_operators where user_id = auth.uid()) $$;
+as $$
+  select coalesce(auth.jwt() ->> 'aal', '') = 'aal2'
+    and exists (select 1 from public.app_operators where user_id = auth.uid())
+$$;
 
 create or replace function public.app_workspace_owner_id()
 returns uuid language sql stable security definer set search_path = ''
@@ -29,6 +32,7 @@ as $$
   select workspace_owner_id
   from public.app_operators
   where user_id = auth.uid()
+    and coalesce(auth.jwt() ->> 'aal', '') = 'aal2'
   limit 1
 $$;
 

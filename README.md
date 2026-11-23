@@ -23,6 +23,12 @@ Do not add these as Secrets or use `sb_secret_...`, `service_role`, database pas
 
 The login screen provides **Forgot password?**, and invitation/recovery links open `/reset-password` inside the HashRouter app. Supabase must allow the exact Pages redirect `https://<account>.github.io/violin-invoice/#/reset-password`. Password updates require at least 6 characters. The app creates no temporary or random application password.
 
+## Multi-factor authentication
+
+Every operator must complete TOTP MFA after password sign-in. An operator without a verified factor enrolls one during the first login; later logins require the current six-digit authenticator code. The database independently requires an `aal2` JWT in its operator helpers, RLS policies, and `finalize_invoice`, so the login UI is not the security boundary.
+
+Only the public Supabase URL and publishable key are used by the browser. No `service_role` key is involved. GoTrue handles MFA enrollment and verification, so no public database grants for MFA are installed.
+
 ## Validation
 
 ```bash

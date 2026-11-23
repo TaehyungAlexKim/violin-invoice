@@ -48,6 +48,14 @@ button:disabled { opacity:.55; cursor:not-allowed; }
 .reset-card { width:min(420px,100%); display:grid; gap:14px; }
 .reset-card h1 { text-align:center; font-size:clamp(24px,6vw,34px); }
 .reset-form { display:grid; gap:14px; }
+.mfa-card { width:min(460px,100%); display:grid; gap:14px; text-align:center; }
+.mfa-card h1 { font-size:clamp(24px,6vw,34px); }
+.mfa-card p { margin:0; }
+.mfa-form { display:grid; gap:14px; text-align:left; }
+.mfa-qr { width:min(240px,75vw); height:auto; justify-self:center; background:white; }
+.mfa-secret-label { font-weight:600; }
+.mfa-secret { padding:10px; overflow-wrap:anywhere; border:1px dashed var(--border); border-radius:6px; background:#f8faf8; color:#173025; }
+.mfa-actions { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; }
 .form-grid { display:grid; gap:14px; }
 .filter-grid { grid-template-columns:repeat(4,minmax(140px,1fr)); margin:16px 0; }
 .student-layout { display:grid; grid-template-columns:minmax(220px,1fr) minmax(320px,1.5fr); gap:16px; margin-top:16px; }

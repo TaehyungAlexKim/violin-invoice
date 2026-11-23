@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { HashRouter, Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { supabase } from './data/supabase'
@@ -8,6 +8,7 @@ import { parseCadToCents, formatCad } from './domain/money'
 import { addCalendarDay, todayInVancouver, parseDateOnly } from './domain/date-only'
 import { downloadInvoice } from './pdf/download-invoice'
 import type { InvoiceSnapshot } from './domain/invoice-snapshot'
+import { decideMfaAccess, mfaFailureDecision } from './domain/mfa'
 import './App.css'
 
 type Student = { id:string; name:string; recipient_name?:string|null; email?:string|null; phone?:string|null; billing_address?:string|null; memo?:string|null }
@@ -54,21 +55,117 @@ function Login() {
   const [password,setPassword] = useState('')
   const [error,setError] = useState('')
   const [success,setSuccess] = useState('')
+  const [phase,setPhase] = useState<'password'|'checking'|'enroll'|'verify'>('password')
+  const [busy,setBusy] = useState(false)
+  const [code,setCode] = useState('')
+  const [mfa,setMfa] = useState<{
+    factorId:string
+    challengeId:string
+    enrollment:boolean
+    qrCode:string
+    secret:string
+  } | null>(null)
   const navigate = useNavigate()
+  const sessionCheckStarted = useRef(false)
   useEffect(()=>{
     const message = sessionStorage.getItem(recoverySuccessKey)
     if(message){sessionStorage.removeItem(recoverySuccessKey);setSuccess(message)}
   },[])
   useEffect(()=>{
-    if(!supabase)return
+    if(!supabase || sessionCheckStarted.current)return
+    sessionCheckStarted.current=true
     async function continueOperator(){
       const {data}=await supabase!.auth.getSession()
-      const session=data.session
-      if(!session || recoverySessionEstablished)return
-      if(await isOperatorUser(supabase!,session.user.id))navigate('/students',{replace:true})
+      if(!data.session || recoverySessionEstablished)return
+      await inspectMfa(data.session.user.id,false)
     }
     void continueOperator()
-  },[navigate])
+    // The one-shot ref prevents this changing callback from repeating session work.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  },[inspectMfa])
+  async function enterAppAfterAal2(userId:string){
+    if(!supabase)return false
+    const assurance=await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
+    if(assurance.error || assurance.data.currentLevel!=='aal2'){
+      setError('Multi-factor authentication is required before you can continue.')
+      setPhase('password')
+      return false
+    }
+    if(!await isOperatorUser(supabase,userId)){
+      setError('Access denied.')
+      setPhase('password')
+      await supabase.auth.signOut()
+      return false
+    }
+    setMfa(null)
+    setCode('')
+    navigate('/students',{replace:true})
+    return true
+  }
+  async function startChallenge(factorId:string,enrollment:boolean,qrCode='',secret=''){
+    if(!supabase)return
+    setBusy(true)
+    const {data,error}=await supabase.auth.mfa.challenge({factorId})
+    setBusy(false)
+    if(error || !data?.id){
+      setError(mfaFailureDecision(error).message)
+      setMfa({factorId,challengeId:'',enrollment,qrCode,secret})
+      setPhase(enrollment?'enroll':'verify')
+      return
+    }
+    setMfa({factorId,challengeId:data.id,enrollment,qrCode,secret})
+    setPhase(enrollment?'enroll':'verify')
+  }
+  async function startEnrollment(){
+    if(!supabase)return
+    setBusy(true)
+    setError('')
+    const {data,error}=await supabase.auth.mfa.enroll({
+      factorType:'totp',
+      friendlyName:'Violin Invoice',
+    })
+    setBusy(false)
+    if(error || !data || !('totp' in data)){
+      setError(mfaFailureDecision(error).message)
+      return
+    }
+    setMfa({
+      factorId:data.id,
+      challengeId:'',
+      enrollment:true,
+      qrCode:data.totp.qr_code,
+      secret:data.totp.secret,
+    })
+    setPhase('enroll')
+  }
+  async function inspectMfa(userId:string,createEnrollment:boolean){
+    if(!supabase)return
+    setPhase('checking')
+    setError('')
+    const [factors,assurance]=await Promise.all([
+      supabase.auth.mfa.listFactors(),
+      supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
+    ])
+    if(factors.error || !factors.data || assurance.error){
+      setPhase('password')
+      setError('Unable to check multi-factor authentication. Sign in again to retry.')
+      return
+    }
+    const decision=decideMfaAccess(assurance.data.currentLevel,factors.data.all)
+    if(decision.kind==='allowed'){
+      await enterAppAfterAal2(userId)
+      return
+    }
+    if(decision.kind==='verify'){
+      setMfa({factorId:decision.factorId,challengeId:'',enrollment:false,qrCode:'',secret:''})
+      setPhase('verify')
+      await startChallenge(decision.factorId,false)
+      return
+    }
+    setMfa(null)
+    setPhase('enroll')
+    if(createEnrollment)await startEnrollment()
+  }
   async function forgotPassword() {
     setError('')
     setSuccess('')
@@ -87,9 +184,111 @@ function Login() {
     event.preventDefault()
     setError('')
     if (!supabase) { setError('Supabase is not configured. Add the public environment variables.'); return }
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) setError(authError(error))
-    else navigate('/students')
+    setBusy(true)
+    const {data,error} = await supabase.auth.signInWithPassword({ email, password })
+    setBusy(false)
+    if (error || !data.user) setError(authError(error ?? new Error('Sign in failed.')))
+    else await inspectMfa(data.user.id,true)
+  }
+  async function verifyMfa(event:FormEvent){
+    event.preventDefault()
+    if(!supabase || !mfa || !/^\d{6}$/.test(code))return
+    setBusy(true)
+    setError('')
+    let challengeId=mfa.challengeId
+    if(!challengeId){
+      const challenge=await supabase.auth.mfa.challenge({factorId:mfa.factorId})
+      if(challenge.error || !challenge.data?.id){
+        setBusy(false)
+        setError(mfaFailureDecision(challenge.error).message)
+        return
+      }
+      challengeId=challenge.data.id
+    }
+    const {error}=await supabase.auth.mfa.verify({
+      factorId:mfa.factorId,
+      challengeId,
+      code,
+    })
+    setBusy(false)
+    if(error){
+      const failure=mfaFailureDecision(error)
+      setError(failure.message)
+      setCode('')
+      if(failure.challengeExpired)setMfa({...mfa,challengeId:''})
+      return
+    }
+    const {data}=await supabase.auth.getSession()
+    if(data.session)await enterAppAfterAal2(data.session.user.id)
+  }
+  async function restartEnrollment(){
+    if(!supabase)return
+    const factorId=mfa?.factorId
+    setBusy(true)
+    setError('')
+    if(factorId){
+      const {error}=await supabase.auth.mfa.unenroll({factorId})
+      if(error){
+        setBusy(false)
+        setError('Unable to restart authenticator enrollment. Sign out and try again.')
+        return
+      }
+    }
+    setBusy(false)
+    setMfa(null)
+    setCode('')
+    await startEnrollment()
+  }
+  async function signOutOfMfa(){
+    await supabase?.auth.signOut()
+    clearWorkspaceOwnerCache()
+    setMfa(null)
+    setCode('')
+    setError('')
+    setPassword('')
+    setPhase('password')
+  }
+  if(phase==='checking'){
+    return <main className="login"><p className="loading" role="status">Checking multi-factor authentication…</p></main>
+  }
+  if(phase==='enroll' || phase==='verify'){
+    const qrSource=mfa?.qrCode || ''
+    return <main className="login"><section className="card mfa-card">
+      <h1>{phase==='enroll'?'Set up authenticator':'Verify sign in'}</h1>
+      {phase==='enroll' && mfa?.qrCode ? <>
+        <p>Scan this QR code with your authenticator app, then enter its current six-digit code.</p>
+        <img className="mfa-qr" src={qrSource} alt="Authenticator QR code" />
+        <p className="mfa-secret-label">Can’t scan the QR code?</p>
+        <code className="mfa-secret">{mfa.secret}</code>
+        <p>Save the authenticator account and any recovery information in a secure password manager.</p>
+      </> : phase==='enroll' ? <>
+        <p>Protect this operator account with an authenticator app before entering the workspace.</p>
+        <button className="primary" type="button" disabled={busy} onClick={startEnrollment}>
+          {busy?'Preparing…':'Set up authenticator'}
+        </button>
+      </> : <p>Enter the current six-digit code from your authenticator app.</p>}
+      {mfa && (phase==='verify' || mfa.qrCode) && <form onSubmit={verifyMfa} className="mfa-form">
+        <label>Six-digit code<input
+          type="text"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          pattern="[0-9]{6}"
+          maxLength={6}
+          value={code}
+          onChange={event=>setCode(event.target.value.replace(/\D/g,'').slice(0,6))}
+          required
+        /></label>
+        <button className="primary" type="submit" disabled={busy || code.length!==6}>
+          {busy?'Verifying…':'Verify and continue'}
+        </button>
+      </form>}
+      {error && <p className="error" role="alert">{error}</p>}
+      <div className="mfa-actions">
+        {phase==='verify' && mfa && <button type="button" disabled={busy} onClick={()=>startChallenge(mfa.factorId,false)}>Get a new challenge</button>}
+        {phase==='enroll' && mfa && <button type="button" disabled={busy} onClick={restartEnrollment}>Restart enrollment</button>}
+        <button type="button" disabled={busy} onClick={signOutOfMfa}>Sign out</button>
+      </div>
+    </section></main>
   }
   return <main className="login"><form onSubmit={submit} className="card">
     <h1>Violin Lesson Invoices</h1>
@@ -97,7 +296,7 @@ function Login() {
     <label>Password<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label>
     {error && <p className="error" role="alert">{error}</p>}
     {success && <p className="success" role="status">{success}</p>}
-    <button className="primary" type="submit">Sign in</button>
+    <button className="primary" type="submit" disabled={busy}>{busy?'Signing in…':'Sign in'}</button>
     <button className="forgot-button" type="button" onClick={forgotPassword}>Forgot password?</button>
   </form></main>
 }
@@ -424,13 +623,33 @@ export async function isOperatorUser(client: NonNullable<typeof supabase>, userI
 }
 
 function Protected() {
-  const [sessionChecked,setSessionChecked]=useState(false); const [hasSession,setHasSession]=useState(false); const [isOperator,setIsOperator]=useState(false)
+  const [sessionChecked,setSessionChecked]=useState(false)
+  const [hasSession,setHasSession]=useState(false)
+  const [hasAal2,setHasAal2]=useState(false)
+  const [isOperator,setIsOperator]=useState(false)
   const navigate=useNavigate()
   useEffect(()=>{
     if(!supabase){setSessionChecked(true);return}
-    async function check(session:Session|null){setHasSession(Boolean(session));if(!session){setIsOperator(false);setSessionChecked(true);return}
-      const user=session.user
-      setIsOperator(await isOperatorUser(supabase!,user.id))
+    async function check(session:Session|null){
+      setSessionChecked(false)
+      setHasSession(Boolean(session))
+      if(!session){
+        clearWorkspaceOwnerCache()
+        setHasAal2(false)
+        setIsOperator(false)
+        setSessionChecked(true)
+        return
+      }
+      const assurance=await supabase!.auth.mfa.getAuthenticatorAssuranceLevel()
+      const aal2=!assurance.error && assurance.data.currentLevel==='aal2'
+      setHasAal2(aal2)
+      if(!aal2){
+        clearWorkspaceOwnerCache()
+        setIsOperator(false)
+        setSessionChecked(true)
+        return
+      }
+      setIsOperator(await isOperatorUser(supabase!,session.user.id))
       setSessionChecked(true)
     }
     supabase.auth.getSession().then(({data})=>check(data.session))
@@ -447,6 +666,7 @@ function Protected() {
   },[navigate])
   if(!sessionChecked)return <p className="loading">Loading…</p>
   if(!hasSession)return <Navigate to="/login" replace />
+  if(!hasAal2)return <Navigate to="/login" replace />
   if(!isOperator)return <main className="login"><h1>Access denied.</h1></main>
   return <Shell><Routes><Route path="/students" element={<Students/>}/><Route path="/students/:id" element={<StudentDetail/>}/><Route path="/lessons" element={<Lessons/>}/><Route path="/invoices" element={<Invoices/>}/><Route path="/invoices/new" element={<CreateInvoice/>}/><Route path="/invoices/:id" element={<InvoiceDetail/>}/><Route path="/settings" element={<Settings/>}/><Route path="*" element={<Navigate to="/students" replace/>}/></Routes></Shell>
 }

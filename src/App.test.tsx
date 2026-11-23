@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildPasswordResetRedirectUrl, isOperatorUser, studentDeleteError, validatePassword } from './App'
+import { decideMfaAccess, mfaFailureDecision } from './domain/mfa'
 
 function operatorClient(result: { data: unknown; error: unknown }) {
   return {
@@ -28,6 +29,33 @@ describe('operator access check', () => {
       expect(studentDeleteError({code:'XX000',message:'database failure'})).toBe(
         'Unable to delete the student. Please try again.',
       )
+    })
+  })
+
+  describe('MFA access decisions', () => {
+    it('enrolls when no verified TOTP factor exists', () => {
+      expect(decideMfaAccess('aal1', [])).toEqual({kind:'enroll'})
+    })
+
+    it('verifies an existing TOTP factor for an AAL1 session', () => {
+      expect(decideMfaAccess('aal1', [{id:'totp-1',factor_type:'totp',status:'verified'}]))
+        .toEqual({kind:'verify',factorId:'totp-1'})
+    })
+
+    it('allows an AAL2 session', () => {
+      expect(decideMfaAccess('aal2', [{id:'totp-1',factor_type:'totp',status:'verified'}]))
+        .toEqual({kind:'allowed'})
+    })
+
+    it('maps verification failure to a safe retry state', () => {
+      expect(mfaFailureDecision({message:'invalid TOTP code'})).toEqual({
+        message:'Invalid authentication code. Enter the current six-digit code and try again.',
+        challengeExpired:false,
+      })
+      expect(mfaFailureDecision({message:'challenge expired'})).toEqual({
+        message:'This verification challenge has expired. Request a new one and try again.',
+        challengeExpired:true,
+      })
     })
   })
 

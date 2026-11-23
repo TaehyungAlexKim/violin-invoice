@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap;
-select plan(12);
+select plan(14);
 
 insert into auth.users(id,email) values
   ('00000000-0000-4000-8000-000000000001','teacher@example.invalid'),
@@ -12,6 +12,7 @@ insert into public.app_operators(user_id,workspace_owner_id) values
 
 set local role authenticated;
 set request.jwt.claim.sub = '00000000-0000-4000-8000-000000000001';
+set request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000001","aal":"aal2","role":"authenticated"}';
 insert into public.teacher_settings(owner_id,teacher_name,currency)
 values('00000000-0000-4000-8000-000000000001','Violin Teacher','CAD');
 insert into public.students(id,owner_id,name) values
@@ -24,6 +25,10 @@ values('30000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000
 select is(count(*)::int,1,'teacher sees shared student') from public.students;
 select is(public.app_workspace_owner_id(),'00000000-0000-4000-8000-000000000001','teacher gets canonical workspace') ;
 set request.jwt.claim.sub = '00000000-0000-4000-8000-000000000002';
+set request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000002","aal":"aal1","role":"authenticated"}';
+select is(count(*)::int,0,'AAL1 operator cannot read app_operators') from public.app_operators;
+select is(count(*)::int,0,'AAL1 operator cannot read students') from public.students;
+set request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000002","aal":"aal2","role":"authenticated"}';
 select is(count(*)::int,1,'admin sees shared student') from public.students;
 select is(count(*)::int,1,'admin sees shared lesson') from public.lessons;
 select is(count(*)::int,1,'admin sees shared draft') from public.invoices;
@@ -42,6 +47,7 @@ select ok(
 );
 
 set request.jwt.claim.sub = '00000000-0000-4000-8000-000000000003';
+set request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000003","aal":"aal2","role":"authenticated"}';
 select is(count(*)::int,0,'unrelated UID sees zero students') from public.students;
 select is(count(*)::int,0,'unrelated UID sees zero invoices') from public.invoices;
 select throws_ok($$insert into public.students(owner_id,name) values('00000000-0000-4000-8000-000000000001','Other')$$,
