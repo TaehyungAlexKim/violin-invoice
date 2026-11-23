@@ -15,7 +15,9 @@ export function hasImplicitRecoveryCallback(href: string): boolean {
   try {
     const url = new URL(href)
     const candidates = [url.searchParams, new URLSearchParams(url.hash.replace(/^#/, ''))]
-    return candidates.some(params => params.get('type') === 'recovery' && Boolean(params.get('access_token')))
+    return candidates.some(params =>
+      ['recovery', 'invite'].includes(params.get('type') || '') && Boolean(params.get('access_token')),
+    )
   } catch {
     return false
   }

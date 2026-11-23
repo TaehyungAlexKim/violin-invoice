@@ -78,6 +78,9 @@ describe('operator access check', () => {
         'https://teacher.github.io/violin-invoice/#access_token=token&type=recovery&expires_in=3600',
       )).toBe(true)
       expect(hasImplicitRecoveryCallback(
+        'https://teacher.github.io/violin-invoice/#access_token=token&type=invite&expires_in=3600',
+      )).toBe(true)
+      expect(hasImplicitRecoveryCallback(
         'https://teacher.github.io/violin-invoice/#/reset-password',
       )).toBe(false)
     })
