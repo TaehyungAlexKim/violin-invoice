@@ -30,17 +30,34 @@ select is(count(*)::int,1,'admin sees shared draft') from public.invoices;
 select is(public.app_workspace_owner_id(),'00000000-0000-4000-8000-000000000001','admin gets canonical workspace');
 insert into public.students(id,owner_id,name) values
 ('10000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000001','Student B');
-select is(count(*)::int,2,'admin insert belongs to shared workspace');
+select ok(
+  (select count(*)::int=2 from public.students)
+  and exists (
+    select 1 from public.students
+    where id='10000000-0000-4000-8000-000000000002'
+      and owner_id='00000000-0000-4000-8000-000000000001'
+      and name='Student B'
+  ),
+  'admin insert belongs to and is visible in shared workspace'
+);
 
 set request.jwt.claim.sub = '00000000-0000-4000-8000-000000000003';
 select is(count(*)::int,0,'unrelated UID sees zero students') from public.students;
 select is(count(*)::int,0,'unrelated UID sees zero invoices') from public.invoices;
 select throws_ok($$insert into public.students(owner_id,name) values('00000000-0000-4000-8000-000000000001','Other')$$,
-  '42501','unrelated UID insert denied');
-select throws_ok($$update public.students set name='Hijacked' where id='10000000-0000-4000-8000-000000000001'$$,
-  null,'unrelated UID update denied or changes zero');
+  '42501','new row violates row-level security policy for table "students"','unrelated UID insert denied');
+select is((
+  with updated as (
+    update public.students
+    set name='Hijacked'
+    where id='10000000-0000-4000-8000-000000000001'
+    returning 1
+  )
+  select count(*)::int from updated
+),0,'unrelated UID update changes zero rows');
 
 set local role anon;
-select is(count(*)::int,0,'anon sees no students') from public.students;
+select throws_ok($$select * from public.students$$,
+  '42501','permission denied for table students','anon cannot directly select students');
 select * from finish();
 rollback;

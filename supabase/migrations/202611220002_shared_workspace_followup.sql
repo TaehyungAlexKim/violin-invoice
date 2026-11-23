@@ -178,7 +178,7 @@ begin
     finalized_at=now(), updated_at=now()
     where id=v_invoice.id;
   insert into public.invoice_lesson_claims(invoice_id,lesson_id,owner_id,claimed_at)
-    select v_invoice.id, lesson->>'sourceLessonId', v_owner, now()
+    select v_invoice.id, (lesson->>'sourceLessonId')::uuid, v_owner, now()
     from jsonb_array_elements(v_lines) lesson;
   return v_snapshot;
 end; $$;
