@@ -61,15 +61,16 @@ export async function downloadInvoice(snapshot: InvoiceSnapshot): Promise<void> 
       binary += String.fromCharCode(...chunk.subarray(i, i + 8192))
     }
     const base64 = btoa(binary)
-    ;(pdfMake as unknown as { vfs: Record<string, string>; fonts: Record<string, unknown> }).vfs = {
-      [font.normalFile]: base64,
-    }
-    ;(pdfMake as unknown as { fonts: Record<string, unknown> }).fonts = {
-      NotoSansKR: { normal: font.normalFile, bold: font.normalFile, italics: font.normalFile, bolditalics: font.normalFile },
-    }
-    blob = await (pdfMake as unknown as {
+    const browserPdfMake = pdfMake as unknown as {
+      addVirtualFileSystem(vfs: Record<string, string>): void
+      addFonts(fonts: Record<string, unknown>): void
       createPdf(documentDefinition: ReturnType<typeof snapshotToDocument>): { getBlob(): Promise<Blob> }
-    }).createPdf(snapshotToDocument(snapshot)).getBlob()
+    }
+    browserPdfMake.addVirtualFileSystem({ [font.normalFile]: base64 })
+    browserPdfMake.addFonts({
+      NotoSansKR: { normal: font.normalFile, bold: font.normalFile, italics: font.normalFile, bolditalics: font.normalFile },
+    })
+    blob = await browserPdfMake.createPdf(snapshotToDocument(snapshot)).getBlob()
   } catch {
     throw new Error('PDF_GENERATION: render failed')
   }
