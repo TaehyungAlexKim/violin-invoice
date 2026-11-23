@@ -15,12 +15,22 @@ begin
 end; $$;
 
 create table public.app_operators (
-  user_id uuid primary key references auth.users(id) on delete cascade
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  workspace_owner_id uuid not null references auth.users(id) on delete cascade
 );
 
 create or replace function public.app_is_operator()
 returns boolean language sql stable security definer set search_path = ''
 as $$ select exists (select 1 from public.app_operators where user_id = auth.uid()) $$;
+
+create or replace function public.app_workspace_owner_id()
+returns uuid language sql stable security definer set search_path = ''
+as $$
+  select workspace_owner_id
+  from public.app_operators
+  where user_id = auth.uid()
+  limit 1
+$$;
 
 create table public.teacher_settings (
   owner_id uuid primary key references auth.users(id) on delete cascade,
@@ -170,23 +180,26 @@ alter table public.invoice_lesson_claims enable row level security;
 alter table public.invoice_counters enable row level security;
 
 create policy app_operators_read_self on public.app_operators for select
-  to authenticated using (public.app_is_operator() and user_id = auth.uid());
+  to authenticated using (
+    public.app_is_operator()
+    and workspace_owner_id = public.app_workspace_owner_id()
+  );
 create policy operator_settings on public.teacher_settings for all
-  to authenticated using (public.app_is_operator() and owner_id = auth.uid())
-  with check (public.app_is_operator() and owner_id = auth.uid());
+  to authenticated using (public.app_is_operator() and owner_id = public.app_workspace_owner_id())
+  with check (public.app_is_operator() and owner_id = public.app_workspace_owner_id());
 create policy operator_students on public.students for all
-  to authenticated using (public.app_is_operator() and owner_id = auth.uid())
-  with check (public.app_is_operator() and owner_id = auth.uid());
+  to authenticated using (public.app_is_operator() and owner_id = public.app_workspace_owner_id())
+  with check (public.app_is_operator() and owner_id = public.app_workspace_owner_id());
 create policy operator_lessons on public.lessons for all
-  to authenticated using (public.app_is_operator() and owner_id = auth.uid())
-  with check (public.app_is_operator() and owner_id = auth.uid());
+  to authenticated using (public.app_is_operator() and owner_id = public.app_workspace_owner_id())
+  with check (public.app_is_operator() and owner_id = public.app_workspace_owner_id());
 create policy operator_drafts on public.invoices for all
-  to authenticated using (public.app_is_operator() and owner_id = auth.uid())
-  with check (public.app_is_operator() and owner_id = auth.uid() and status = 'draft');
+  to authenticated using (public.app_is_operator() and owner_id = public.app_workspace_owner_id())
+  with check (public.app_is_operator() and owner_id = public.app_workspace_owner_id() and status = 'draft');
 create policy operator_claim_read on public.invoice_lesson_claims for select
-  to authenticated using (public.app_is_operator() and owner_id = auth.uid());
+  to authenticated using (public.app_is_operator() and owner_id = public.app_workspace_owner_id());
 create policy operator_counters on public.invoice_counters for select
-  to authenticated using (public.app_is_operator() and owner_id = auth.uid());
+  to authenticated using (public.app_is_operator() and owner_id = public.app_workspace_owner_id());
 
 revoke all on all tables in schema public from anon;
 revoke all on all tables in schema public from authenticated;
@@ -197,12 +210,16 @@ grant select, insert, update, delete on public.lessons to authenticated;
 grant select, insert, update, delete on public.invoices to authenticated;
 grant select on public.invoice_lesson_claims to authenticated;
 grant select on public.invoice_counters to authenticated;
+revoke execute on function public.app_workspace_owner_id() from public, anon;
+revoke execute on function public.app_is_operator() from public, anon;
+grant execute on function public.app_workspace_owner_id() to authenticated;
+grant execute on function public.app_is_operator() to authenticated;
 
 create or replace function public.finalize_invoice(p_invoice_id uuid, p_period_start date, p_period_end date)
 returns jsonb language plpgsql security definer set search_path = ''
 as $$
 declare
-  v_owner uuid := auth.uid();
+  v_owner uuid;
   v_invoice public.invoices%rowtype;
   v_student public.students%rowtype;
   v_teacher public.teacher_settings%rowtype;
@@ -223,6 +240,7 @@ declare
   );
   v_lesson record;
 begin
+  v_owner := public.app_workspace_owner_id();
   if v_owner is null or not public.app_is_operator() then
     raise exception using errcode='42501', message='Access denied.';
   end if;

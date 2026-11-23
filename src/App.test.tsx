@@ -15,7 +15,7 @@ function operatorClient(result: { data: unknown; error: unknown }) {
 
 describe('operator access check', () => {
   it('allows only an exact operator-row match', async () => {
-    expect(await isOperatorUser(operatorClient({data:{user_id:'operator'},error:null}), 'operator')).toBe(true)
+    expect(await isOperatorUser(operatorClient({data:{workspace_owner_id:'workspace-owner'},error:null}), 'operator')).toBe(true)
   })
 
   describe('student deletion error', () => {

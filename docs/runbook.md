@@ -1,5 +1,17 @@
 # Operations Runbook
 
+## Shared trusted-operator workspace
+
+- Enroll exactly the teacher and project owner/admin in `public.app_operators`.
+- Give both rows the same `workspace_owner_id`, choosing one trusted operator's Auth UID as the canonical owner.
+- Both accounts may read/write the same settings, students, lessons, draft invoices, and immutable PDF snapshots.
+- Do not add a student or parent account to `app_operators`; the application has no student login.
+- Before production changes, verify the two rows and helper result:
+  ```sql
+  select user_id, workspace_owner_id from public.app_operators order by user_id;
+  ```
+- An unrelated Auth UID must return no application rows and cannot call `finalize_invoice`.
+
 ## Deployment
 
 Pages must use Source **GitHub Actions**. Public repository Pages are the clearest zero-cost path; private repositories may consume Actions allowance.

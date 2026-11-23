@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { HashRouter, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { supabase } from './data/supabase'
+import { clearWorkspaceOwnerCache, loadWorkspaceOwnerId } from './data/workspace'
 import type { Session } from '@supabase/supabase-js'
 import { parseCadToCents, formatCad } from './domain/money'
 import { addCalendarDay, todayInVancouver, parseDateOnly } from './domain/date-only'
@@ -54,7 +55,7 @@ function Shell({children}:{children:React.ReactNode}) {
   const [email,setEmail]=useState('')
   const navigate=useNavigate()
   useEffect(()=>{ supabase?.auth.getUser().then(({data})=>setEmail(data.user?.email ?? '')) },[])
-  async function logout(){ await supabase?.auth.signOut(); navigate('/login') }
+  async function logout(){ await supabase?.auth.signOut(); clearWorkspaceOwnerCache(); navigate('/login') }
   return <div className="shell">
     <header><strong>Violin Invoices</strong><div className="account"><span>{email}</span><button onClick={logout}>Log out</button></div></header>
     <nav aria-label="Main navigation">
@@ -74,8 +75,11 @@ function Settings() {
   useEffect(()=>{ if(!supabase)return; supabase.from('teacher_settings').select('*').maybeSingle().then(({data})=>{
     if(data){setTeacherName(data.teacher_name||'');setBusinessName(data.business_name||'');setAddress(data.address||'');setEmail(data.email||'');setPhone(data.phone||'')}
   })},[])
-  async function save(e:FormEvent){e.preventDefault();if(!supabase)return;const {error}=await supabase.from('teacher_settings').upsert({
-    owner_id:(await supabase.auth.getUser()).data.user?.id,
+  async function save(e:FormEvent){e.preventDefault();if(!supabase)return
+    const workspaceOwnerId=await loadWorkspaceOwnerId(supabase,(await supabase.auth.getUser()).data.user!.id)
+    if(!workspaceOwnerId){setMessage('Access denied.');return}
+    const {error}=await supabase.from('teacher_settings').upsert({
+    owner_id:workspaceOwnerId,
     teacher_name:teacherName.trim(),business_name:businessName.trim()||null,address:address.trim()||null,email:email.trim()||null,phone:phone.trim()||null,currency:'CAD'
   });setMessage(error?authError(error):'Settings saved.') }
   return <section><h1>Settings</h1><form onSubmit={save} className="form-grid">
@@ -99,7 +103,9 @@ function Students() {
   async function save(e:FormEvent){e.preventDefault();if(!supabase)return;
     const user=(await supabase.auth.getUser()).data.user
     if(!user)return
-    const payload={owner_id:user.id,name:(form.name||'').trim(),recipient_name:form.recipient_name?.trim()||null,email:form.email?.trim()||null,phone:form.phone?.trim()||null,billing_address:form.billing_address?.trim()||null,memo:form.memo?.trim()||null}
+    const workspaceOwnerId=await loadWorkspaceOwnerId(supabase,user.id)
+    if(!workspaceOwnerId){setMessage('Access denied.');return}
+    const payload={owner_id:workspaceOwnerId,name:(form.name||'').trim(),recipient_name:form.recipient_name?.trim()||null,email:form.email?.trim()||null,phone:form.phone?.trim()||null,billing_address:form.billing_address?.trim()||null,memo:form.memo?.trim()||null}
     const {error}=form.id?await supabase.from('students').update(payload).eq('id',form.id):await supabase.from('students').insert(payload)
     setMessage(error?authError(error):'Student saved.')
     if(!error){setForm({name:''});load()}
@@ -163,7 +169,9 @@ function Lessons() {
       parseDateOnly(lessonDate); const cents=parseCadToCents(amount)
       if(!supabase||!studentId)return
       const user=(await supabase.auth.getUser()).data.user;if(!user)return
-      const payload={owner_id:user.id,student_id:studentId,lesson_date:lessonDate,minutes:Number(minutes),charge_cents:cents,entry_key:crypto.randomUUID()}
+      const workspaceOwnerId=await loadWorkspaceOwnerId(supabase,user.id)
+      if(!workspaceOwnerId){setMessage('Access denied.');return}
+      const payload={owner_id:workspaceOwnerId,student_id:studentId,lesson_date:lessonDate,minutes:Number(minutes),charge_cents:cents,entry_key:crypto.randomUUID()}
       const {data,error}=await supabase.from('lessons').insert(payload).select().maybeSingle()
       if(error){setMessage(authError(error));return}
       const duplicates=lessons.filter(x=>x.student_id===studentId&&x.lesson_date===lessonDate&&x.minutes===Number(minutes)&&x.charge_cents===cents)
@@ -256,17 +264,19 @@ function CreateInvoice() {
   const [students,setStudents]=useState<Student[]>([]); const [studentId,setStudentId]=useState(''); const navigate=useNavigate()
   useEffect(()=>{if(supabase)supabase.from('students').select('*').order('name').then(({data})=>setStudents(data||[]))},[])
   async function create(){if(!supabase||!studentId)return;const user=(await supabase.auth.getUser()).data.user;if(!user)return
+    const workspaceOwnerId=await loadWorkspaceOwnerId(supabase,user.id)
+    if(!workspaceOwnerId){alert('Access denied.');return}
     const end=todayInVancouver();let start=end.slice(0,7)+'-01'
     const {data:latest}=await supabase.from('invoices').select('period_end,finalized_at,id').eq('student_id',studentId).eq('status','finalized').order('period_end',{ascending:false}).order('finalized_at',{ascending:false}).order('id',{ascending:false}).limit(1).maybeSingle()
     if(latest)start=addCalendarDay(latest.period_end)
-    const {data,error}=await supabase.from('invoices').insert({owner_id:user.id,student_id:studentId,status:'draft',period_start:start,period_end:end}).select().single()
+    const {data,error}=await supabase.from('invoices').insert({owner_id:workspaceOwnerId,student_id:studentId,status:'draft',period_start:start,period_end:end}).select().single()
     if(error)alert(authError(error));else navigate(`/invoices/${data.id}`)
   }
   return <section><h1>Create invoice</h1><div className="card form-grid"><label>Student<select value={studentId} onChange={e=>setStudentId(e.target.value)}><option value="">Select a student</option>{students.map(s=><option value={s.id} key={s.id}>{s.name}</option>)}</select></label><button className="primary" disabled={!studentId} onClick={create}>Create draft</button></div></section>
 }
 
 export async function isOperatorUser(client: NonNullable<typeof supabase>, userId: string): Promise<boolean> {
-  const {data,error}=await client.from('app_operators').select('user_id').eq('user_id',userId).maybeSingle()
+  const {data,error}=await client.from('app_operators').select('workspace_owner_id').eq('user_id',userId).maybeSingle()
   return !error && Boolean(data)
 }
 
