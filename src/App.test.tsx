@@ -1,6 +1,14 @@
-import { describe, expect, it } from 'vitest'
-import { buildPasswordResetRedirectUrl, isOperatorUser, studentDeleteError, validatePassword } from './App'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  buildPasswordResetRedirectUrl,
+  hasImplicitRecoveryCallback,
+  isOperatorUser,
+  signOutLocalSession,
+  studentDeleteError,
+  validatePassword,
+} from './App'
 import { decideMfaAccess, mfaFailureDecision } from './domain/mfa'
+import { browserAuthOptions, lessonSaveError, passwordResetRequestError } from './domain/auth'
 
 function operatorClient(result: { data: unknown; error: unknown }) {
   return {
@@ -60,9 +68,31 @@ describe('operator access check', () => {
   })
 
   describe('password reset', () => {
-    it('builds a GitHub Pages HashRouter recovery redirect', () => {
+    it('uses the Pages base URL without a HashRouter fragment', () => {
       expect(buildPasswordResetRedirectUrl('https://teacher.github.io/', '/violin-invoice/'))
-        .toBe('https://teacher.github.io/violin-invoice/#/reset-password')
+        .toBe('https://teacher.github.io/violin-invoice/')
+    })
+
+    it('recognizes an implicit recovery token before route protection', () => {
+      expect(hasImplicitRecoveryCallback(
+        'https://teacher.github.io/violin-invoice/#access_token=token&type=recovery&expires_in=3600',
+      )).toBe(true)
+      expect(hasImplicitRecoveryCallback(
+        'https://teacher.github.io/violin-invoice/#/reset-password',
+      )).toBe(false)
+    })
+
+    it('configures implicit persistent browser sessions', () => {
+      expect(browserAuthOptions).toEqual({
+        flowType:'implicit',
+        detectSessionInUrl:true,
+        persistSession:true,
+      })
+    })
+
+    it('maps reset throttling without exposing provider text', () => {
+      expect(passwordResetRequestError({status:429,message:'rate limit secret detail'}))
+        .toBe('Too many password reset requests. Wait a few minutes and try again.')
     })
 
     it('enforces the minimum password length', () => {
@@ -80,5 +110,38 @@ describe('operator access check', () => {
   it('denies missing operators, RLS mismatches, and query errors uniformly', async () => {
     expect(await isOperatorUser(operatorClient({data:null,error:null}), 'second-user')).toBe(false)
     expect(await isOperatorUser(operatorClient({data:null,error:{message:'permission denied'}}), 'second-user')).toBe(false)
+  })
+})
+
+describe('local session removal', () => {
+  it('requests local sign-out and clears the workspace only after success', async () => {
+    const signOut=vi.fn().mockResolvedValue({error:null})
+    const afterRemoval=vi.fn()
+    const client={auth:{signOut}} as unknown as Parameters<typeof signOutLocalSession>[0]
+
+    expect(await signOutLocalSession(client,afterRemoval)).toBe('')
+    expect(signOut).toHaveBeenCalledWith({scope:'local'})
+    expect(afterRemoval).toHaveBeenCalledOnce()
+  })
+
+  it('retains local state and reports a useful error when sign-out fails', async () => {
+    const signOut=vi.fn().mockResolvedValue({error:{message:'network'}})
+    const afterRemoval=vi.fn()
+    const client={auth:{signOut}} as unknown as Parameters<typeof signOutLocalSession>[0]
+
+    expect(await signOutLocalSession(client,afterRemoval))
+      .toBe('Unable to sign out. Your local session is still active; please try again.')
+    expect(afterRemoval).not.toHaveBeenCalled()
+  })
+})
+
+describe('finalized lesson period errors', () => {
+  it('explains the retroactive lesson rejection in English', () => {
+    expect(lessonSaveError({
+      code:'23514',
+      message:'This lesson falls within a finalized invoice period and cannot be saved.',
+    })).toBe(
+      'This lesson falls within a finalized invoice period and cannot be saved. Choose a date outside that period or review the finalized invoice.',
+    )
   })
 })

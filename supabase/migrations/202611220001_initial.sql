@@ -163,14 +163,34 @@ end; $$;
 create trigger lessons_immutable_claimed before update or delete on public.lessons
 for each row execute function public.reject_claimed_lesson_mutation();
 
+create or replace function public.reject_lesson_in_finalized_period()
+returns trigger language plpgsql security definer set search_path = ''
+as $$
+begin
+  if exists (
+    select 1
+    from public.invoices i
+    where i.owner_id = new.owner_id
+      and i.student_id = new.student_id
+      and i.status = 'finalized'
+      and new.lesson_date between i.period_start and i.period_end
+  ) then
+    raise exception using errcode='23514',
+      message='This lesson falls within a finalized invoice period and cannot be saved.';
+  end if;
+  return new;
+end; $$;
+create trigger lessons_reject_finalized_period before insert or update on public.lessons
+for each row execute function public.reject_lesson_in_finalized_period();
+
 create or replace function public.reject_finalized_invoice_mutation()
 returns trigger language plpgsql security definer set search_path = ''
 as $$
 begin
-  if tg_op = 'DELETE' or (old.status = 'finalized') then
+  if old.status = 'finalized' then
     raise exception using errcode='23514', message='Finalized invoices are immutable.';
   end if;
-  return new;
+  return coalesce(new, old);
 end; $$;
 create trigger invoices_immutable before update or delete on public.invoices
 for each row execute function public.reject_finalized_invoice_mutation();

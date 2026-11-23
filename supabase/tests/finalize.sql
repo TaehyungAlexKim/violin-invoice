@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap;
-select plan(16);
+select plan(21);
 
 insert into auth.users(id,email) values
  ('00000000-0000-4000-8001-000000000011','teacher@example.invalid'),
@@ -44,6 +44,26 @@ select ok(
   'only selected lesson is claimed with a UUID lesson_id'
 );
 select is(invoice_number like 'VI-2026-%',true,'first shared invoice number formatted') from public.invoices where id='30000000-0000-4000-8001-000000000011';
+select throws_ok($$
+  insert into public.lessons(owner_id,student_id,lesson_date,minutes,charge_cents,entry_key)
+  values('00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000011','2026-11-04',30,5000,gen_random_uuid())
+$$,'23514','This lesson falls within a finalized invoice period and cannot be saved.','retroactive lesson insert rejected');
+insert into public.students(id,owner_id,name) values
+ ('10000000-0000-4000-8001-000000000012','00000000-0000-4000-8001-000000000011','Park');
+insert into public.lessons(id,owner_id,student_id,lesson_date,minutes,charge_cents,entry_key)
+ values
+ ('20000000-0000-4000-8001-000000000013','00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000012','2026-11-04',30,5000,gen_random_uuid()),
+ ('20000000-0000-4000-8001-000000000014','00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000011','2027-01-04',30,5000,gen_random_uuid());
+select throws_ok($$
+  update public.lessons
+  set student_id='10000000-0000-4000-8001-000000000011'
+  where id='20000000-0000-4000-8001-000000000013'
+$$,'23514','This lesson falls within a finalized invoice period and cannot be saved.','lesson move to finalized-period student rejected');
+select throws_ok($$
+  update public.lessons
+  set lesson_date='2026-11-04'
+  where id='20000000-0000-4000-8001-000000000014'
+$$,'23514','This lesson falls within a finalized invoice period and cannot be saved.','lesson date move into finalized period rejected');
 
 set request.jwt.claim.sub = '00000000-0000-4000-8001-000000000011';
 set request.jwt.claims = '{"sub":"00000000-0000-4000-8001-000000000011","aal":"aal2","role":"authenticated"}';
@@ -68,6 +88,12 @@ select throws_ok($$select public.finalize_invoice('30000000-0000-4000-8001-00000
 insert into public.invoices(id,owner_id,student_id,status,period_start,period_end)
  values('30000000-0000-4000-8001-000000000014','00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000011','draft','2026-11-03','2026-11-05');
 select throws_ok($$select public.finalize_invoice('30000000-0000-4000-8001-000000000014','2026-11-03','2026-11-05')$$,'23P01','This period overlaps an existing finalized invoice.','shared finalized overlap rejected');
+select lives_ok($$
+  delete from public.invoices where id='30000000-0000-4000-8001-000000000014'
+$$,'draft invoice deletion succeeds');
+select throws_ok($$
+  delete from public.invoices where id='30000000-0000-4000-8001-000000000011'
+$$,'23514','Finalized invoices are immutable.','finalized invoice deletion rejected');
 
 select * from finish();
 rollback;

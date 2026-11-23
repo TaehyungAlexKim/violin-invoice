@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { HashRouter, Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
-import { supabase } from './data/supabase'
+import { initialRecoveryCallback, supabase } from './data/supabase'
 import { clearWorkspaceOwnerCache, loadWorkspaceOwnerId } from './data/workspace'
 import type { Session } from '@supabase/supabase-js'
 import { parseCadToCents, formatCad } from './domain/money'
@@ -9,6 +9,12 @@ import { addCalendarDay, todayInVancouver, parseDateOnly } from './domain/date-o
 import { downloadInvoice } from './pdf/download-invoice'
 import type { InvoiceSnapshot } from './domain/invoice-snapshot'
 import { decideMfaAccess, mfaFailureDecision } from './domain/mfa'
+import {
+  buildPasswordResetRedirectUrl,
+  hasImplicitRecoveryCallback,
+  lessonSaveError,
+  passwordResetRequestError,
+} from './domain/auth'
 import './App.css'
 
 type Student = { id:string; name:string; recipient_name?:string|null; email?:string|null; phone?:string|null; billing_address?:string|null; memo?:string|null }
@@ -17,17 +23,16 @@ type Invoice = { id:string; student_id:string; status:'draft'|'finalized'; perio
 
 function authError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
+  const status = (error as {status?:number}|null)?.status
+  if(status===429 || /rate.?limit|too many requests|over_request_rate_limit/i.test(message)) {
+    return 'Too many requests. Wait a few minutes and try again.'
+  }
   if (/invalid|password|credentials/i.test(message)) return 'Invalid email or password.'
   if (/operator|access/i.test(message)) return 'Access denied.'
   return 'Unable to complete the request. Please try again.'
 }
 
-export function buildPasswordResetRedirectUrl(origin: string, baseUrl: string): string {
-  const cleanOrigin = origin.replace(/\/+$/, '')
-  const trimmedBase = baseUrl.replace(/^\/+|\/+$/g, '')
-  const cleanBase = trimmedBase ? `/${trimmedBase}/` : '/'
-  return `${cleanOrigin}${cleanBase}#/reset-password`
-}
+export { buildPasswordResetRedirectUrl, hasImplicitRecoveryCallback } from './domain/auth'
 
 export function validatePassword(password: string, confirmation: string): string {
   if (password.length < 6) return 'Password must be at least 6 characters.'
@@ -41,6 +46,16 @@ export function passwordResetRedirectUrl(): string {
 
 const recoverySuccessKey = 'violin-invoice-password-set'
 let recoverySessionEstablished = false
+
+export async function signOutLocalSession(
+  client: NonNullable<typeof supabase>,
+  afterRemoval: () => void = clearWorkspaceOwnerCache,
+): Promise<string> {
+  const {error}=await client.auth.signOut({scope:'local'})
+  if(error)return 'Unable to sign out. Your local session is still active; please try again.'
+  afterRemoval()
+  return ''
+}
 
 export function studentDeleteError(error: unknown): string {
   const value = error as {code?:string; message?:string}
@@ -94,7 +109,14 @@ function Login() {
     if(!await isOperatorUser(supabase,userId)){
       setError('Access denied.')
       setPhase('password')
-      await supabase.auth.signOut()
+      const signOutError=await signOutLocalSession(supabase)
+      if(signOutError){
+        setError(signOutError)
+        return false
+      }
+      setPassword('')
+      setMfa(null)
+      setCode('')
       return false
     }
     setMfa(null)
@@ -176,9 +198,8 @@ function Login() {
     }
     if(!supabase){setError('Supabase is not configured. Add the public environment variables.');return}
     const {error}=await supabase.auth.resetPasswordForEmail(normalizedEmail,{redirectTo:passwordResetRedirectUrl()})
-    setSuccess(error
-      ? 'Unable to send a reset email. Please try again.'
-      : 'If this email belongs to an operator, a password reset email has been sent.')
+    if(error)setError(passwordResetRequestError(error))
+    else setSuccess('If this email belongs to an operator, a password reset email has been sent.')
   }
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -240,8 +261,12 @@ function Login() {
     await startEnrollment()
   }
   async function signOutOfMfa(){
-    await supabase?.auth.signOut()
-    clearWorkspaceOwnerCache()
+    if(!supabase)return
+    const signOutError=await signOutLocalSession(supabase)
+    if(signOutError){
+      setError(signOutError)
+      return
+    }
     setMfa(null)
     setCode('')
     setError('')
@@ -343,9 +368,8 @@ function ResetPassword() {
     }
     if(!supabase){setError('Supabase is not configured.');return}
     const {error}=await supabase.auth.resetPasswordForEmail(email.trim(),{redirectTo:passwordResetRedirectUrl()})
-    setMessage(error
-      ? 'Unable to send a reset email. Please try again.'
-      : 'If this email belongs to an operator, a password reset email has been sent.')
+    if(error)setError(passwordResetRequestError(error))
+    else setMessage('If this email belongs to an operator, a password reset email has been sent.')
   }
 
   async function setPasswordSubmit(event:FormEvent){
@@ -362,8 +386,14 @@ function ResetPassword() {
         : 'Unable to set the password. Please try again.')
       return
     }
-    await supabase.auth.signOut()
+    const signOutError=await signOutLocalSession(supabase)
+    if(signOutError){
+      setError(signOutError)
+      return
+    }
     recoverySessionEstablished=false
+    setPassword('')
+    setConfirmation('')
     sessionStorage.setItem(recoverySuccessKey,'Your password is set. You can now sign in.')
     navigate('/login',{replace:true})
   }
@@ -395,11 +425,20 @@ function ResetPassword() {
 
 function Shell({children}:{children:React.ReactNode}) {
   const [email,setEmail]=useState('')
+  const [logoutError,setLogoutError]=useState('')
   const navigate=useNavigate()
   useEffect(()=>{ supabase?.auth.getUser().then(({data})=>setEmail(data.user?.email ?? '')) },[])
-  async function logout(){ await supabase?.auth.signOut(); clearWorkspaceOwnerCache(); navigate('/login') }
+  async function logout(){
+    if(!supabase)return
+    setLogoutError('')
+    const signOutError=await signOutLocalSession(supabase)
+    if(signOutError){setLogoutError(signOutError);return}
+    setEmail('')
+    navigate('/login')
+  }
   return <div className="shell">
     <header><strong>Violin Invoices</strong><div className="account"><span>{email}</span><button onClick={logout}>Log out</button></div></header>
+    {logoutError&&<p className="error account-error" role="alert">{logoutError}</p>}
     <nav aria-label="Main navigation">
       <NavLink to="/students">Students</NavLink>
       <NavLink to="/lessons">Lessons</NavLink>
@@ -515,14 +554,14 @@ function Lessons() {
       if(!workspaceOwnerId){setMessage('Access denied.');return}
       const payload={owner_id:workspaceOwnerId,student_id:studentId,lesson_date:lessonDate,minutes:Number(minutes),charge_cents:cents,entry_key:crypto.randomUUID()}
       const {data,error}=await supabase.from('lessons').insert(payload).select().maybeSingle()
-      if(error){setMessage(authError(error));return}
+      if(error){setMessage(lessonSaveError(error));return}
       const duplicates=lessons.filter(x=>x.student_id===studentId&&x.lesson_date===lessonDate&&x.minutes===Number(minutes)&&x.charge_cents===cents)
       setMessage(duplicates.length?'Lesson saved. Duplicate candidate: an earlier matching lesson exists.':'Lesson saved.')
       if(data)setLessons(prev=>[data as Lesson,...prev])
     }catch(error){setMessage(error instanceof Error?error.message:'Unable to save lesson.')}
   }
   async function editLesson(lesson:Lesson){if(claimed.has(lesson.id)){setMessage('This lesson is included in a finalized invoice and cannot be edited.');return}setEditing(lesson);setLessonDate(lesson.lesson_date);setMinutes(String(lesson.minutes));setAmount((lesson.charge_cents/100).toFixed(2))}
-  async function saveEdit(e:FormEvent){e.preventDefault();if(!supabase||!editing)return;try{const cents=parseCadToCents(amount);const {error}=await supabase.from('lessons').update({lesson_date:lessonDate,minutes:Number(minutes),charge_cents:cents}).eq('id',editing.id);if(error){setMessage(authError(error));return}setMessage('Lesson saved.');setEditing(null);load()}catch(error){setMessage(error instanceof Error?error.message:'Unable to save lesson.')}}
+  async function saveEdit(e:FormEvent){e.preventDefault();if(!supabase||!editing)return;try{const cents=parseCadToCents(amount);const {error}=await supabase.from('lessons').update({lesson_date:lessonDate,minutes:Number(minutes),charge_cents:cents}).eq('id',editing.id);if(error){setMessage(lessonSaveError(error));return}setMessage('Lesson saved.');setEditing(null);load()}catch(error){setMessage(error instanceof Error?error.message:'Unable to save lesson.')}}
   async function deleteLesson(lesson:Lesson){if(claimed.has(lesson.id)){setMessage('This lesson is included in a finalized invoice and cannot be deleted.');return}if(!confirm('Delete this lesson?'))return;if(!supabase)return;const {error}=await supabase.from('lessons').delete().eq('id',lesson.id);setMessage(error?authError(error):'Lesson deleted.');if(!error)load()}
   const filtered=lessons.filter(l=>(!filterStudent||l.student_id===filterStudent)&&(!filterStart||l.lesson_date>=filterStart)&&(!filterEnd||l.lesson_date<=filterEnd)&&(billed==='all'||(billed==='billed'?claimed.has(l.id):!claimed.has(l.id))))
   return <section><h1>Lessons</h1><form onSubmit={editing?saveEdit:save} className="lesson-form card">
@@ -671,19 +710,44 @@ function Protected() {
   return <Shell><Routes><Route path="/students" element={<Students/>}/><Route path="/students/:id" element={<StudentDetail/>}/><Route path="/lessons" element={<Lessons/>}/><Route path="/invoices" element={<Invoices/>}/><Route path="/invoices/new" element={<CreateInvoice/>}/><Route path="/invoices/:id" element={<InvoiceDetail/>}/><Route path="/settings" element={<Settings/>}/><Route path="*" element={<Navigate to="/students" replace/>}/></Routes></Shell>
 }
 
-export default function App() {
-  useEffect(()=>{document.documentElement.lang='en-CA'},[])
+function RecoveryRouter() {
+  const [ready,setReady]=useState(false)
+  const navigate=useNavigate()
   useEffect(()=>{
-    if(!supabase)return
-    const {data}=supabase.auth.onAuthStateChange((event)=>{
-      if(event==='PASSWORD_RECOVERY')recoverySessionEstablished=true
+    if(!supabase){
+      setReady(true)
+      return
+    }
+    let active=true
+    const {data:listener}=supabase.auth.onAuthStateChange((event,session)=>{
+      if(event==='PASSWORD_RECOVERY' && session){
+        recoverySessionEstablished=true
+        navigate('/reset-password',{replace:true})
+      }
       if(event==='SIGNED_OUT')recoverySessionEstablished=false
     })
-    return()=>data.subscription.unsubscribe()
-  },[])
-  return <HashRouter><Routes>
+    void supabase.auth.getSession().then(({data})=>{
+      if(!active)return
+      if(data.session && (initialRecoveryCallback || hasImplicitRecoveryCallback(window.location.href))){
+        recoverySessionEstablished=true
+        navigate('/reset-password',{replace:true})
+      }
+      setReady(true)
+    })
+    return()=>{
+      active=false
+      listener.subscription.unsubscribe()
+    }
+  },[navigate])
+  if(!ready)return <p className="loading" role="status">Loading…</p>
+  return <Routes>
     <Route path="/login" element={<Login/>}/>
     <Route path="/reset-password" element={<ResetPassword/>}/>
     <Route path="*" element={<Protected/>}/>
-  </Routes></HashRouter>
+  </Routes>
+}
+
+export default function App() {
+  useEffect(()=>{document.documentElement.lang='en-CA'},[])
+  return <HashRouter><RecoveryRouter/></HashRouter>
 }
