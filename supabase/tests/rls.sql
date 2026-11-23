@@ -46,15 +46,13 @@ select is(count(*)::int,0,'unrelated UID sees zero students') from public.studen
 select is(count(*)::int,0,'unrelated UID sees zero invoices') from public.invoices;
 select throws_ok($$insert into public.students(owner_id,name) values('00000000-0000-4000-8000-000000000001','Other')$$,
   '42501','new row violates row-level security policy for table "students"','unrelated UID insert denied');
-select is((
-  with updated as (
-    update public.students
-    set name='Hijacked'
-    where id='10000000-0000-4000-8000-000000000001'
-    returning 1
-  )
-  select count(*)::int from updated
-),0,'unrelated UID update changes zero rows');
+with updated as (
+  update public.students
+  set name='Hijacked'
+  where id='10000000-0000-4000-8000-000000000001'
+  returning 1
+)
+select is(count(*)::int,0,'unrelated UID update changes zero rows') from updated;
 
 set local role anon;
 select throws_ok($$select * from public.students$$,
