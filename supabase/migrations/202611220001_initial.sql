@@ -143,7 +143,7 @@ as $$
 begin
   if exists (select 1 from public.invoice_lesson_claims c where c.lesson_id = old.id) then
     raise exception using errcode='23514', message='This lesson is included in a finalized invoice and cannot be changed.';
-  end;
+  end if;
   return coalesce(new, old);
 end; $$;
 create trigger lessons_immutable_claimed before update or delete on public.lessons
@@ -155,7 +155,7 @@ as $$
 begin
   if tg_op = 'DELETE' or (old.status = 'finalized') then
     raise exception using errcode='23514', message='Finalized invoices are immutable.';
-  end;
+  end if;
   return new;
 end; $$;
 create trigger invoices_immutable before update or delete on public.invoices
@@ -225,17 +225,17 @@ declare
 begin
   if v_owner is null or not public.app_is_operator() then
     raise exception using errcode='42501', message='Access denied.';
-  end;
+  end if;
   if p_period_start is null or p_period_end is null then
     raise exception using errcode='22023', message='A valid period start and end date are required.';
-  end;
+  end if;
   if p_period_start > p_period_end then
     raise exception using errcode='22023', message='The start date must be on or before the end date.';
-  end;
+  end if;
   select * into v_invoice from public.invoices where id=p_invoice_id for update;
   if not found or v_invoice.owner_id <> v_owner or v_invoice.status <> 'draft' then
     raise exception using errcode='P0002', message='Draft invoice was not found.';
-  end;
+  end if;
   update public.invoices
     set period_start=p_period_start, period_end=p_period_end, updated_at=now()
     where id=v_invoice.id;
@@ -247,35 +247,35 @@ begin
       and i.period && daterange(v_invoice.period_start, v_invoice.period_end, '[]')
   ) then
     raise exception using errcode='23P01', message='This period overlaps an existing finalized invoice.';
-  end;
+  end if;
   select * into v_student from public.students
     where id=v_invoice.student_id and owner_id=v_owner for share;
-  if not found then raise exception using errcode='P0002', message='Student was not found.'; end;
+  if not found then raise exception using errcode='P0002', message='Student was not found.'; end if;
   select * into v_teacher from public.teacher_settings where owner_id=v_owner;
   if not found or btrim(v_teacher.teacher_name)='' then
     raise exception using errcode='55000', message='Teacher name is required before finalizing.';
-  end;
+  end if;
 
   v_sender := jsonb_build_object('teacherName', btrim(v_teacher.teacher_name),
     'currency', v_teacher.currency);
   if v_teacher.business_name is not null and btrim(v_teacher.business_name)<>'' then
-    v_sender := v_sender || jsonb_build_object('businessName', btrim(v_teacher.business_name)); end;
+    v_sender := v_sender || jsonb_build_object('businessName', btrim(v_teacher.business_name)); end if;
   if v_teacher.address is not null and btrim(v_teacher.address)<>'' then
-    v_sender := v_sender || jsonb_build_object('address', btrim(v_teacher.address)); end;
+    v_sender := v_sender || jsonb_build_object('address', btrim(v_teacher.address)); end if;
   if v_teacher.email is not null and btrim(v_teacher.email)<>'' then
-    v_sender := v_sender || jsonb_build_object('email', btrim(v_teacher.email)); end;
+    v_sender := v_sender || jsonb_build_object('email', btrim(v_teacher.email)); end if;
   if v_teacher.phone is not null and btrim(v_teacher.phone)<>'' then
-    v_sender := v_sender || jsonb_build_object('phone', btrim(v_teacher.phone)); end;
+    v_sender := v_sender || jsonb_build_object('phone', btrim(v_teacher.phone)); end if;
 
   v_recipient := jsonb_build_object('studentName', btrim(v_student.name));
   if v_student.recipient_name is not null and btrim(v_student.recipient_name)<>'' then
-    v_recipient := v_recipient || jsonb_build_object('recipientName', btrim(v_student.recipient_name)); end;
+    v_recipient := v_recipient || jsonb_build_object('recipientName', btrim(v_student.recipient_name)); end if;
   if v_student.email is not null and btrim(v_student.email)<>'' then
-    v_recipient := v_recipient || jsonb_build_object('email', btrim(v_student.email)); end;
+    v_recipient := v_recipient || jsonb_build_object('email', btrim(v_student.email)); end if;
   if v_student.phone is not null and btrim(v_student.phone)<>'' then
-    v_recipient := v_recipient || jsonb_build_object('phone', btrim(v_student.phone)); end;
+    v_recipient := v_recipient || jsonb_build_object('phone', btrim(v_student.phone)); end if;
   if v_student.billing_address is not null and btrim(v_student.billing_address)<>'' then
-    v_recipient := v_recipient || jsonb_build_object('billingAddress', btrim(v_student.billing_address)); end;
+    v_recipient := v_recipient || jsonb_build_object('billingAddress', btrim(v_student.billing_address)); end if;
 
   for v_lesson in
     select l.* from public.lessons l
@@ -288,7 +288,7 @@ begin
     v_total := v_total + v_lesson.charge_cents;
     if v_total > 2147483647 then
       raise exception using errcode='22003', message='Invoice total exceeds the supported limit.';
-    end;
+    end if;
     v_lines := v_lines || jsonb_build_object(
       'sourceLessonId', v_lesson.id,
       'lessonDate', to_char(v_lesson.lesson_date, 'YYYY-MM-DD'),
@@ -298,7 +298,7 @@ begin
   end loop;
   if jsonb_array_length(v_lines)=0 then
     raise exception using errcode='P0001', message='At least one unclaimed lesson is required.';
-  end;
+  end if;
 
   insert into public.invoice_counters(owner_id,year,last_value)
     values(v_owner,v_year,0)
