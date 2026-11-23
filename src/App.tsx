@@ -10,7 +10,7 @@ import { clearWorkspaceOwnerCache, loadWorkspaceOwnerId } from './data/workspace
 import type { Session } from '@supabase/supabase-js'
 import { parseCadToCents, formatCad } from './domain/money'
 import { addCalendarDay, todayInVancouver, parseDateOnly } from './domain/date-only'
-import { downloadInvoice } from './pdf/download-invoice'
+import { downloadInvoice, pdfDownloadErrorMessage } from './pdf/download-invoice'
 import type { InvoiceSnapshot } from './domain/invoice-snapshot'
 import { decideMfaAccess, mfaFailureDecision } from './domain/mfa'
 import {
@@ -710,8 +710,8 @@ function InvoiceDetail() {
     try {
       await downloadInvoice(snapshot)
       setMessage('Invoice finalized. PDF download started.')
-    } catch {
-      setMessage('Invoice finalized, but the PDF download failed. Use Download PDF to try again.')
+    } catch (error) {
+      setMessage(`Invoice finalized. ${pdfDownloadErrorMessage(error)}`)
     } finally {
       setFinalizing(false)
     }
@@ -724,8 +724,8 @@ function InvoiceDetail() {
     try{
       await downloadInvoice(invoice.snapshot_json)
       setMessage('PDF download started.')
-    }catch{
-      setMessage('The PDF could not be downloaded. Check browser download permissions and try again.')
+    }catch(error){
+      setMessage(pdfDownloadErrorMessage(error))
     }finally{
       setDownloading(false)
     }
