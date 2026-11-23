@@ -4,6 +4,16 @@ export const browserAuthOptions = {
   persistSession: true,
 }
 
+export const recoveryInProgressKey = 'violin-invoice-recovery-in-progress'
+
+const authUrlParameters = [
+  'access_token',
+  'refresh_token',
+  'expires_in',
+  'token_type',
+  'type',
+] as const
+
 export function buildPasswordResetRedirectUrl(origin: string, baseUrl: string): string {
   const cleanOrigin = origin.replace(/\/+$/, '')
   const trimmedBase = baseUrl.replace(/^\/+|\/+$/g, '')
@@ -11,16 +21,71 @@ export function buildPasswordResetRedirectUrl(origin: string, baseUrl: string): 
   return `${cleanOrigin}${cleanBase}`
 }
 
+function authCallbackParams(href: string): URLSearchParams[] {
+  const url = new URL(href)
+  const hash = url.hash.replace(/^#/, '')
+  const queryIndex = hash.indexOf('?')
+  const hashParams = queryIndex >= 0 ? hash.slice(queryIndex + 1) : hash
+  return [url.searchParams, new URLSearchParams(hashParams)]
+}
+
 export function hasImplicitRecoveryCallback(href: string): boolean {
   try {
-    const url = new URL(href)
-    const candidates = [url.searchParams, new URLSearchParams(url.hash.replace(/^#/, ''))]
-    return candidates.some(params =>
+    return authCallbackParams(href).some(params =>
       ['recovery', 'invite'].includes(params.get('type') || '') && Boolean(params.get('access_token')),
     )
   } catch {
     return false
   }
+}
+
+export function implicitRecoverySessionMatches(href: string, accessToken: string | undefined): boolean {
+  if (!accessToken) return false
+  try {
+    return authCallbackParams(href).some(params =>
+      ['recovery', 'invite'].includes(params.get('type') || '')
+      && params.get('access_token') === accessToken,
+    )
+  } catch {
+    return false
+  }
+}
+
+export function scrubAuthParamsAndRoute(href: string, route: string): string {
+  const url = new URL(href)
+  for (const parameter of authUrlParameters) url.searchParams.delete(parameter)
+
+  const cleanRoute = route.startsWith('#') ? route : `#${route}`
+  url.hash = cleanRoute
+  return url.toString()
+}
+
+export type RecoveryTransition =
+  | { kind: 'start' }
+  | { kind: 'ignore' }
+
+export function decideRecoveryTransition({
+  event,
+  hasSession,
+  matchesInitialCallback,
+  active,
+  consumed,
+}: {
+  event: string
+  hasSession: boolean
+  matchesInitialCallback: boolean
+  active: boolean
+  consumed: boolean
+}): RecoveryTransition {
+  if (!hasSession || active || consumed) return { kind: 'ignore' }
+  if (event === 'PASSWORD_RECOVERY') return { kind: 'start' }
+  if (
+    matchesInitialCallback
+    && (event === 'INITIAL_SESSION' || event === 'SIGNED_IN')
+  ) {
+    return { kind: 'start' }
+  }
+  return { kind: 'ignore' }
 }
 
 export function passwordResetRequestError(error: unknown): string {

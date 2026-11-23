@@ -8,7 +8,13 @@ import {
   validatePassword,
 } from './App'
 import { decideMfaAccess, mfaFailureDecision } from './domain/mfa'
-import { browserAuthOptions, lessonSaveError, passwordResetRequestError } from './domain/auth'
+import {
+  browserAuthOptions,
+  decideRecoveryTransition,
+  lessonSaveError,
+  passwordResetRequestError,
+  scrubAuthParamsAndRoute,
+} from './domain/auth'
 
 function operatorClient(result: { data: unknown; error: unknown }) {
   return {
@@ -75,14 +81,88 @@ describe('operator access check', () => {
 
     it('recognizes an implicit recovery token before route protection', () => {
       expect(hasImplicitRecoveryCallback(
-        'https://teacher.github.io/violin-invoice/#access_token=token&type=recovery&expires_in=3600',
+        'https://teacher.github.io/violin-invoice/#access_token=redacted&type=recovery&expires_in=3600',
       )).toBe(true)
       expect(hasImplicitRecoveryCallback(
-        'https://teacher.github.io/violin-invoice/#access_token=token&type=invite&expires_in=3600',
+        'https://teacher.github.io/violin-invoice/#access_token=redacted&type=invite&expires_in=3600',
       )).toBe(true)
       expect(hasImplicitRecoveryCallback(
         'https://teacher.github.io/violin-invoice/#/reset-password',
       )).toBe(false)
+      expect(hasImplicitRecoveryCallback(
+        'https://teacher.github.io/violin-invoice/#access_token=redacted&type=magiclink',
+      )).toBe(false)
+    })
+
+    it('scrubs callback credentials and replaces the route with history-safe URL data', () => {
+      const scrubbed = scrubAuthParamsAndRoute(
+        'https://teacher.github.io/violin-invoice/?keep=yes&access_token=query-redacted'
+        + '#access_token=fragment-redacted&refresh_token=refresh-redacted'
+        + '&expires_in=3600&token_type=bearer&type=recovery',
+        '/reset-password',
+      )
+
+      expect(scrubbed).toBe(
+        'https://teacher.github.io/violin-invoice/?keep=yes#/reset-password',
+      )
+      for (const parameter of ['access_token','refresh_token','expires_in','token_type','type']) {
+        expect(scrubbed).not.toContain(`${parameter}=`)
+      }
+    })
+
+    it('starts recovery exactly once and ignores later auth events', () => {
+      const initial = decideRecoveryTransition({
+        event: 'PASSWORD_RECOVERY',
+        hasSession: true,
+        matchesInitialCallback: true,
+        active: false,
+        consumed: false,
+      })
+      expect(initial).toEqual({kind:'start'})
+
+      expect(decideRecoveryTransition({
+        event: 'PASSWORD_RECOVERY',
+        hasSession: true,
+        matchesInitialCallback: true,
+        active: false,
+        consumed: true,
+      })).toEqual({kind:'ignore'})
+      expect(decideRecoveryTransition({
+        event: 'PASSWORD_RECOVERY',
+        hasSession: true,
+        matchesInitialCallback: true,
+        active: true,
+        consumed: false,
+      })).toEqual({kind:'ignore'})
+    })
+
+    it('does not turn token refresh or MFA verification into recovery transitions', () => {
+      for (const event of ['TOKEN_REFRESHED', 'MFA_CHALLENGE_VERIFIED', 'USER_UPDATED']) {
+        expect(decideRecoveryTransition({
+          event,
+          hasSession: true,
+          matchesInitialCallback: true,
+          active: false,
+          consumed: false,
+        })).toEqual({kind:'ignore'})
+      }
+    })
+
+    it('uses a matching initial session for invite callbacks', () => {
+      expect(decideRecoveryTransition({
+        event: 'SIGNED_IN',
+        hasSession: true,
+        matchesInitialCallback: true,
+        active: false,
+        consumed: false,
+      })).toEqual({kind:'start'})
+      expect(decideRecoveryTransition({
+        event: 'INITIAL_SESSION',
+        hasSession: true,
+        matchesInitialCallback: false,
+        active: false,
+        consumed: false,
+      })).toEqual({kind:'ignore'})
     })
 
     it('configures implicit persistent browser sessions', () => {

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { HashRouter, Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
-import { initialRecoveryCallback, supabase } from './data/supabase'
+import {
+  consumeInitialRecoveryCallback,
+  matchesInitialRecoverySession,
+  supabase,
+} from './data/supabase'
 import { clearWorkspaceOwnerCache, loadWorkspaceOwnerId } from './data/workspace'
 import type { Session } from '@supabase/supabase-js'
 import { parseCadToCents, formatCad } from './domain/money'
@@ -11,9 +15,11 @@ import type { InvoiceSnapshot } from './domain/invoice-snapshot'
 import { decideMfaAccess, mfaFailureDecision } from './domain/mfa'
 import {
   buildPasswordResetRedirectUrl,
-  hasImplicitRecoveryCallback,
+  decideRecoveryTransition,
   lessonSaveError,
   passwordResetRequestError,
+  recoveryInProgressKey,
+  scrubAuthParamsAndRoute,
 } from './domain/auth'
 import './App.css'
 
@@ -32,7 +38,10 @@ function authError(error: unknown): string {
   return 'Unable to complete the request. Please try again.'
 }
 
-export { buildPasswordResetRedirectUrl, hasImplicitRecoveryCallback } from './domain/auth'
+export {
+  buildPasswordResetRedirectUrl,
+  hasImplicitRecoveryCallback,
+} from './domain/auth'
 
 export function validatePassword(password: string, confirmation: string): string {
   if (password.length < 6) return 'Password must be at least 6 characters.'
@@ -45,7 +54,48 @@ export function passwordResetRedirectUrl(): string {
 }
 
 const recoverySuccessKey = 'violin-invoice-password-set'
-let recoverySessionEstablished = false
+let recoveryCallbackConsumed = false
+
+function recoveryInProgress(): boolean {
+  return sessionStorage.getItem(recoveryInProgressKey) === '1'
+}
+
+function clearRecoveryState(): void {
+  sessionStorage.removeItem(recoveryInProgressKey)
+}
+
+function replaceCleanRoute(route: string): void {
+  window.history.replaceState(
+    window.history.state,
+    '',
+    scrubAuthParamsAndRoute(window.location.href, route),
+  )
+}
+
+function finishRecovery(route: string): void {
+  clearRecoveryState()
+  replaceCleanRoute(route)
+}
+
+function beginRecovery(
+  event: string,
+  session: Session | null,
+  matchesInitialCallback: boolean,
+): boolean {
+  const decision = decideRecoveryTransition({
+    event,
+    hasSession: Boolean(session),
+    matchesInitialCallback,
+    active: recoveryInProgress(),
+    consumed: recoveryCallbackConsumed,
+  })
+  if(decision.kind === 'ignore')return false
+  recoveryCallbackConsumed = true
+  consumeInitialRecoveryCallback()
+  sessionStorage.setItem(recoveryInProgressKey, '1')
+  replaceCleanRoute('/reset-password')
+  return true
+}
 
 export async function signOutLocalSession(
   client: NonNullable<typeof supabase>,
@@ -91,7 +141,7 @@ function Login() {
     sessionCheckStarted.current=true
     async function continueOperator(){
       const {data}=await supabase!.auth.getSession()
-      if(!data.session || recoverySessionEstablished)return
+      if(!data.session || recoveryInProgress())return
       await inspectMfa(data.session.user.id,false)
     }
     void continueOperator()
@@ -114,6 +164,7 @@ function Login() {
         setError(signOutError)
         return false
       }
+      finishRecovery('/login')
       setPassword('')
       setMfa(null)
       setCode('')
@@ -121,6 +172,7 @@ function Login() {
     }
     setMfa(null)
     setCode('')
+    finishRecovery('/students')
     navigate('/students',{replace:true})
     return true
   }
@@ -209,7 +261,10 @@ function Login() {
     const {data,error} = await supabase.auth.signInWithPassword({ email, password })
     setBusy(false)
     if (error || !data.user) setError(authError(error ?? new Error('Sign in failed.')))
-    else await inspectMfa(data.user.id,true)
+    else {
+      finishRecovery('/login')
+      await inspectMfa(data.user.id,true)
+    }
   }
   async function verifyMfa(event:FormEvent){
     event.preventDefault()
@@ -267,6 +322,7 @@ function Login() {
       setError(signOutError)
       return
     }
+    finishRecovery('/login')
     setMfa(null)
     setCode('')
     setError('')
@@ -340,9 +396,7 @@ function ResetPassword() {
     if(!supabase){setChecking(false);setError('Supabase is not configured.');return}
     async function checkSession(){
       const {data}=await supabase!.auth.getSession()
-      const href=window.location.href
-      const recoveryLink=/(type=recovery|access_token=|[?&]code=)/i.test(href)
-      if(data.session && (recoverySessionEstablished || recoveryLink)){
+      if(data.session && recoveryInProgress()){
         setHasRecoverySession(true)
       }
       setChecking(false)
@@ -350,9 +404,14 @@ function ResetPassword() {
     void checkSession()
     const {data}=supabase.auth.onAuthStateChange((event,session)=>{
       if(event==='PASSWORD_RECOVERY' && session){
-        recoverySessionEstablished=true
-        setHasRecoverySession(true)
-        setChecking(false)
+        if(recoveryInProgress()){
+          setHasRecoverySession(true)
+          setChecking(false)
+        }
+      }
+      if(event==='SIGNED_OUT'){
+        clearRecoveryState()
+        setHasRecoverySession(false)
       }
     })
     return()=>data.subscription.unsubscribe()
@@ -391,10 +450,23 @@ function ResetPassword() {
       setError(signOutError)
       return
     }
-    recoverySessionEstablished=false
+    finishRecovery('/login')
     setPassword('')
     setConfirmation('')
     sessionStorage.setItem(recoverySuccessKey,'Your password is set. You can now sign in.')
+    navigate('/login',{replace:true})
+  }
+
+  async function cancelRecovery(){
+    if(!supabase)return
+    setError('')
+    const signOutError=await signOutLocalSession(supabase)
+    if(signOutError){
+      setError(signOutError)
+      return
+    }
+    finishRecovery('/login')
+    setHasRecoverySession(false)
     navigate('/login',{replace:true})
   }
 
@@ -410,6 +482,7 @@ function ResetPassword() {
         {message && <p className="success" role="status">{message}</p>}
         <button className="primary" type="submit">Set password</button>
       </form>
+      <button type="button" className="forgot-button" onClick={cancelRecovery}>Cancel and sign out</button>
     </> : <>
       <p>This page needs a valid password recovery link from Supabase. Open the most recent reset email, or request another one below.</p>
       <form onSubmit={sendReset} className="reset-form">
@@ -433,8 +506,9 @@ function Shell({children}:{children:React.ReactNode}) {
     setLogoutError('')
     const signOutError=await signOutLocalSession(supabase)
     if(signOutError){setLogoutError(signOutError);return}
+    finishRecovery('/login')
     setEmail('')
-    navigate('/login')
+    navigate('/login',{replace:true})
   }
   return <div className="shell">
     <header><strong>Violin Invoices</strong><div className="account"><span>{email}</span><button onClick={logout}>Log out</button></div></header>
@@ -672,6 +746,11 @@ function Protected() {
     async function check(session:Session|null){
       setSessionChecked(false)
       setHasSession(Boolean(session))
+      if(session && recoveryInProgress()){
+        setSessionChecked(true)
+        navigate('/reset-password',{replace:true})
+        return
+      }
       if(!session){
         clearWorkspaceOwnerCache()
         setHasAal2(false)
@@ -693,12 +772,11 @@ function Protected() {
     }
     supabase.auth.getSession().then(({data})=>check(data.session))
     const {data}=supabase.auth.onAuthStateChange((event,s)=>{
-      if(event==='PASSWORD_RECOVERY'){
-        recoverySessionEstablished=true
-        navigate('/reset-password',{replace:true})
-        return
+      if(event==='SIGNED_OUT'){
+        clearRecoveryState()
+        clearWorkspaceOwnerCache()
       }
-      if(event==='SIGNED_OUT')recoverySessionEstablished=false
+      if(event==='PASSWORD_RECOVERY' || recoveryInProgress())return
       void check(s)
     })
     return()=>data.subscription.unsubscribe()
@@ -720,16 +798,29 @@ function RecoveryRouter() {
     }
     let active=true
     const {data:listener}=supabase.auth.onAuthStateChange((event,session)=>{
-      if(event==='PASSWORD_RECOVERY' && session){
-        recoverySessionEstablished=true
-        navigate('/reset-password',{replace:true})
+      if(event==='SIGNED_OUT'){
+        clearRecoveryState()
+        return
       }
-      if(event==='SIGNED_OUT')recoverySessionEstablished=false
+      if(beginRecovery(
+        event,
+        session,
+        matchesInitialRecoverySession(session),
+      )){
+        navigate('/reset-password',{replace:true})
+        return
+      }
     })
     void supabase.auth.getSession().then(({data})=>{
       if(!active)return
-      if(data.session && (initialRecoveryCallback || hasImplicitRecoveryCallback(window.location.href))){
-        recoverySessionEstablished=true
+      if(beginRecovery(
+        'INITIAL_SESSION',
+        data.session,
+        matchesInitialRecoverySession(data.session),
+      )){
+        navigate('/reset-password',{replace:true})
+      }else if(data.session && recoveryInProgress()){
+        replaceCleanRoute('/reset-password')
         navigate('/reset-password',{replace:true})
       }
       setReady(true)
