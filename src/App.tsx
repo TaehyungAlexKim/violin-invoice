@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { HashRouter, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
+import { HashRouter, Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import { supabase } from './data/supabase'
 import { clearWorkspaceOwnerCache, loadWorkspaceOwnerId } from './data/workspace'
 import type { Session } from '@supabase/supabase-js'
@@ -21,6 +21,26 @@ function authError(error: unknown): string {
   return 'Unable to complete the request. Please try again.'
 }
 
+export function buildPasswordResetRedirectUrl(origin: string, baseUrl: string): string {
+  const cleanOrigin = origin.replace(/\/+$/, '')
+  const trimmedBase = baseUrl.replace(/^\/+|\/+$/g, '')
+  const cleanBase = trimmedBase ? `/${trimmedBase}/` : '/'
+  return `${cleanOrigin}${cleanBase}#/reset-password`
+}
+
+export function validatePassword(password: string, confirmation: string): string {
+  if (password.length < 6) return 'Password must be at least 6 characters.'
+  if (password !== confirmation) return 'Passwords do not match.'
+  return ''
+}
+
+export function passwordResetRedirectUrl(): string {
+  return buildPasswordResetRedirectUrl(window.location.origin, import.meta.env.BASE_URL)
+}
+
+const recoverySuccessKey = 'violin-invoice-password-set'
+let recoverySessionEstablished = false
+
 export function studentDeleteError(error: unknown): string {
   const value = error as {code?:string; message?:string}
   if (value.code === '23503' || /foreign key|linked|invoice|lesson/i.test(value.message||'')) {
@@ -33,7 +53,36 @@ function Login() {
   const [email,setEmail] = useState('')
   const [password,setPassword] = useState('')
   const [error,setError] = useState('')
+  const [success,setSuccess] = useState('')
   const navigate = useNavigate()
+  useEffect(()=>{
+    const message = sessionStorage.getItem(recoverySuccessKey)
+    if(message){sessionStorage.removeItem(recoverySuccessKey);setSuccess(message)}
+  },[])
+  useEffect(()=>{
+    if(!supabase)return
+    async function continueOperator(){
+      const {data}=await supabase!.auth.getSession()
+      const session=data.session
+      if(!session || recoverySessionEstablished)return
+      if(await isOperatorUser(supabase!,session.user.id))navigate('/students',{replace:true})
+    }
+    void continueOperator()
+  },[navigate])
+  async function forgotPassword() {
+    setError('')
+    setSuccess('')
+    const normalizedEmail=email.trim()
+    if(!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)){
+      setError('Enter a valid email address before requesting a reset.')
+      return
+    }
+    if(!supabase){setError('Supabase is not configured. Add the public environment variables.');return}
+    const {error}=await supabase.auth.resetPasswordForEmail(normalizedEmail,{redirectTo:passwordResetRedirectUrl()})
+    setSuccess(error
+      ? 'Unable to send a reset email. Please try again.'
+      : 'If this email belongs to an operator, a password reset email has been sent.')
+  }
   async function submit(event: FormEvent) {
     event.preventDefault()
     setError('')
@@ -47,8 +96,102 @@ function Login() {
     <label>Email<input type="email" autoComplete="email" value={email} onChange={e=>setEmail(e.target.value)} required /></label>
     <label>Password<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label>
     {error && <p className="error" role="alert">{error}</p>}
+    {success && <p className="success" role="status">{success}</p>}
     <button className="primary" type="submit">Sign in</button>
+    <button className="forgot-button" type="button" onClick={forgotPassword}>Forgot password?</button>
   </form></main>
+}
+
+function ResetPassword() {
+  const [checking,setChecking]=useState(true)
+  const [hasRecoverySession,setHasRecoverySession]=useState(false)
+  const [email,setEmail]=useState('')
+  const [password,setPassword]=useState('')
+  const [confirmation,setConfirmation]=useState('')
+  const [error,setError]=useState('')
+  const [message,setMessage]=useState('')
+  const navigate=useNavigate()
+
+  useEffect(()=>{
+    if(!supabase){setChecking(false);setError('Supabase is not configured.');return}
+    async function checkSession(){
+      const {data}=await supabase!.auth.getSession()
+      const href=window.location.href
+      const recoveryLink=/(type=recovery|access_token=|[?&]code=)/i.test(href)
+      if(data.session && (recoverySessionEstablished || recoveryLink)){
+        setHasRecoverySession(true)
+      }
+      setChecking(false)
+    }
+    void checkSession()
+    const {data}=supabase.auth.onAuthStateChange((event,session)=>{
+      if(event==='PASSWORD_RECOVERY' && session){
+        recoverySessionEstablished=true
+        setHasRecoverySession(true)
+        setChecking(false)
+      }
+    })
+    return()=>data.subscription.unsubscribe()
+  },[])
+
+  async function sendReset(event:FormEvent){
+    event.preventDefault()
+    setError('')
+    setMessage('')
+    if(!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())){
+      setError('Enter a valid email address.')
+      return
+    }
+    if(!supabase){setError('Supabase is not configured.');return}
+    const {error}=await supabase.auth.resetPasswordForEmail(email.trim(),{redirectTo:passwordResetRedirectUrl()})
+    setMessage(error
+      ? 'Unable to send a reset email. Please try again.'
+      : 'If this email belongs to an operator, a password reset email has been sent.')
+  }
+
+  async function setPasswordSubmit(event:FormEvent){
+    event.preventDefault()
+    setError('')
+    setMessage('')
+    const validationError=validatePassword(password,confirmation)
+    if(validationError){setError(validationError);return}
+    if(!supabase){setError('Supabase is not configured.');return}
+    const {error}=await supabase.auth.updateUser({password})
+    if(error){
+      setError(error.message?.toLowerCase().includes('session')
+        ? 'The recovery session has expired. Request a new reset email.'
+        : 'Unable to set the password. Please try again.')
+      return
+    }
+    await supabase.auth.signOut()
+    recoverySessionEstablished=false
+    sessionStorage.setItem(recoverySuccessKey,'Your password is set. You can now sign in.')
+    navigate('/login',{replace:true})
+  }
+
+  if(checking)return <main className="login"><p className="loading" role="status">Checking reset link…</p></main>
+  return <main className="login"><section className="card reset-card">
+    <h1>{hasRecoverySession?'Set your password':'Password reset link required'}</h1>
+    {hasRecoverySession ? <>
+      <p>Choose a new password for this operator account.</p>
+      <form onSubmit={setPasswordSubmit} className="reset-form">
+        <label>New password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="new-password" minLength={6} required /></label>
+        <label>Confirm new password<input type="password" value={confirmation} onChange={e=>setConfirmation(e.target.value)} autoComplete="new-password" minLength={6} required /></label>
+        {error && <p className="error" role="alert">{error}</p>}
+        {message && <p className="success" role="status">{message}</p>}
+        <button className="primary" type="submit">Set password</button>
+      </form>
+    </> : <>
+      <p>This page needs a valid password recovery link from Supabase. Open the most recent reset email, or request another one below.</p>
+      <form onSubmit={sendReset} className="reset-form">
+        <label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="email" required /></label>
+        {error && <p className="error" role="alert">{error}</p>}
+        {message && <p className="success" role="status">{message}</p>}
+        <button className="primary" type="submit">Send reset email</button>
+      </form>
+      <Link to="/login">Return to login</Link>
+    </>}
+  </section></main>
 }
 
 function Shell({children}:{children:React.ReactNode}) {
@@ -282,6 +425,7 @@ export async function isOperatorUser(client: NonNullable<typeof supabase>, userI
 
 function Protected() {
   const [sessionChecked,setSessionChecked]=useState(false); const [hasSession,setHasSession]=useState(false); const [isOperator,setIsOperator]=useState(false)
+  const navigate=useNavigate()
   useEffect(()=>{
     if(!supabase){setSessionChecked(true);return}
     async function check(session:Session|null){setHasSession(Boolean(session));if(!session){setIsOperator(false);setSessionChecked(true);return}
@@ -290,9 +434,17 @@ function Protected() {
       setSessionChecked(true)
     }
     supabase.auth.getSession().then(({data})=>check(data.session))
-    const {data}=supabase.auth.onAuthStateChange((_event,s)=>check(s))
+    const {data}=supabase.auth.onAuthStateChange((event,s)=>{
+      if(event==='PASSWORD_RECOVERY'){
+        recoverySessionEstablished=true
+        navigate('/reset-password',{replace:true})
+        return
+      }
+      if(event==='SIGNED_OUT')recoverySessionEstablished=false
+      void check(s)
+    })
     return()=>data.subscription.unsubscribe()
-  },[])
+  },[navigate])
   if(!sessionChecked)return <p className="loading">Loading…</p>
   if(!hasSession)return <Navigate to="/login" replace />
   if(!isOperator)return <main className="login"><h1>Access denied.</h1></main>
@@ -301,5 +453,17 @@ function Protected() {
 
 export default function App() {
   useEffect(()=>{document.documentElement.lang='en-CA'},[])
-  return <HashRouter><Routes><Route path="/login" element={<Login/>}/><Route path="*" element={<Protected/>}/></Routes></HashRouter>
+  useEffect(()=>{
+    if(!supabase)return
+    const {data}=supabase.auth.onAuthStateChange((event)=>{
+      if(event==='PASSWORD_RECOVERY')recoverySessionEstablished=true
+      if(event==='SIGNED_OUT')recoverySessionEstablished=false
+    })
+    return()=>data.subscription.unsubscribe()
+  },[])
+  return <HashRouter><Routes>
+    <Route path="/login" element={<Login/>}/>
+    <Route path="/reset-password" element={<ResetPassword/>}/>
+    <Route path="*" element={<Protected/>}/>
+  </Routes></HashRouter>
 }

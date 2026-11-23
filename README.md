@@ -19,6 +19,10 @@ In the repository, open **Settings → Secrets and variables → Actions → Var
 
 Do not add these as Secrets or use `sb_secret_...`, `service_role`, database passwords, or signing keys. Repository Variables are public in the built Pages bundle. A missing variable fails the deployment build.
 
+## Password recovery
+
+The login screen provides **Forgot password?**, and invitation/recovery links open `/reset-password` inside the HashRouter app. Supabase must allow the exact Pages redirect `https://<account>.github.io/violin-invoice/#/reset-password`. Password updates require at least 6 characters. The app creates no temporary or random application password.
+
 ## Validation
 
 ```bash

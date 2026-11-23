@@ -24,6 +24,14 @@ Check Supabase warning email and dashboard weekly. Free projects can pause after
 
 Set Confirmation, Magic Link, and Recovery subject/body/footer text to English. Verify callbacks return to the exact Pages hash route.
 
+### Password invite/recovery operations
+
+1. Invite or recover only an enrolled operator account.
+2. Supabase sends an English email that opens `https://<account>.github.io/violin-invoice/#/reset-password`.
+3. The operator chooses a password of at least 6 characters and confirms it; the app signs out the temporary recovery session after a successful update.
+4. Do not create or send a separate app password: this agent does not generate temporary passwords.
+5. If the reset page says a recovery link is absent or expired, use **Send reset email** or **Forgot password?** on the login screen.
+
 ## Rollback
 
 Revert the GitHub commit and redeploy Pages. Review database migrations explicitly; never rewrite finalized invoice snapshots.

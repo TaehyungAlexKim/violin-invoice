@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isOperatorUser, studentDeleteError } from './App'
+import { buildPasswordResetRedirectUrl, isOperatorUser, studentDeleteError, validatePassword } from './App'
 
 function operatorClient(result: { data: unknown; error: unknown }) {
   return {
@@ -28,6 +28,25 @@ describe('operator access check', () => {
       expect(studentDeleteError({code:'XX000',message:'database failure'})).toBe(
         'Unable to delete the student. Please try again.',
       )
+    })
+  })
+
+  describe('password reset', () => {
+    it('builds a GitHub Pages HashRouter recovery redirect', () => {
+      expect(buildPasswordResetRedirectUrl('https://teacher.github.io/', '/violin-invoice/'))
+        .toBe('https://teacher.github.io/violin-invoice/#/reset-password')
+    })
+
+    it('enforces the minimum password length', () => {
+      expect(validatePassword('12345', '12345')).toBe('Password must be at least 6 characters.')
+    })
+
+    it('requires matching confirmation text', () => {
+      expect(validatePassword('123456', '654321')).toBe('Passwords do not match.')
+    })
+
+    it('accepts a matching password meeting the minimum', () => {
+      expect(validatePassword('123456', '123456')).toBe('')
     })
   })
   it('denies missing operators, RLS mismatches, and query errors uniformly', async () => {
