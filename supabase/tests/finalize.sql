@@ -103,14 +103,14 @@ values('00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000
 select throws_ok($$
   insert into public.invoices(owner_id,student_id,status,period_start,period_end,entry_key)
   values('00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000011','draft','2028-02-01','2028-02-28','70000000-0000-4000-8001-000000000011')
-$$,'23505','duplicate key value violates unique constraint','duplicate draft entry key is rejected');
+$$,'23505','duplicate key value violates unique constraint "invoices_owner_entry_key_unique"','duplicate draft entry key is rejected');
 
 -- Soft archive preserves existing lessons/invoices while rejecting new ownership.
 update public.students
 set archived_at=now()
 where id='10000000-0000-4000-8001-000000000011';
 select ok(
-  (select count(*)=2 from public.lessons where student_id='10000000-0000-4000-8001-000000000011')
+  (select count(*)=3 from public.lessons where student_id='10000000-0000-4000-8001-000000000011')
   and (select count(*)>=2 from public.invoices where student_id='10000000-0000-4000-8001-000000000011'),
   'archive retains existing lessons and invoices'
 );
