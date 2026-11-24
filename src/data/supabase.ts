@@ -11,6 +11,7 @@ let initialRecoveryHref = typeof window !== 'undefined' ? window.location.href :
 
 export const initialRecoveryCallback = hasImplicitRecoveryCallback(initialRecoveryHref)
 export const isConfigured = Boolean(url && key && !url.includes('your-project-ref') && !key.includes('replace'))
+export const isFixtureMode = Boolean(key?.includes('fixture'))
 export const supabase = isConfigured
   ? createClient(url!, key!, { auth: browserAuthOptions })
   : null

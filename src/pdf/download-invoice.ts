@@ -18,13 +18,24 @@ export function pdfDownloadErrorMessage(error: unknown): string {
   return 'The PDF could not be downloaded. Check browser download permissions and try again.'
 }
 
-export async function downloadInvoice(snapshot: InvoiceSnapshot): Promise<void> {
+export type PdfDownloadProgress = {
+  stage: 'font'|'renderer'|'generating'|'download'
+  loaded?: number
+  total?: number
+}
+
+export async function downloadInvoice(
+  snapshot: InvoiceSnapshot,
+  onProgress?: (progress: PdfDownloadProgress) => void,
+): Promise<void> {
   if (snapshot.schemaVersion !== 1) throw new Error('Unsupported snapshot schema version.')
-  if (snapshot.render.templateVersion !== '1.0') throw new Error('Unsupported PDF template version.')
+  if (snapshot.render.templateVersion !== '1.0' && snapshot.render.templateVersion !== '2.0') throw new Error('Unsupported PDF template version.')
   if (snapshot.render.rendererName !== 'pdfmake' || snapshot.render.rendererVersion !== '0.3.15') {
     throw new Error('Unsupported PDF renderer version.')
   }
-  const font = FONT_REGISTRY['1.0']
+  const font = snapshot.render.templateVersion === '2.0'
+    ? FONT_REGISTRY['2.0']
+    : FONT_REGISTRY['1.0']
   if (snapshot.render.fontManifest.family !== font.family ||
       snapshot.render.fontManifest.normalFile !== font.normalFile ||
       snapshot.render.fontManifest.sha256 !== font.sha256 ||
@@ -33,6 +44,8 @@ export async function downloadInvoice(snapshot: InvoiceSnapshot): Promise<void> 
   }
   let pdfMake
   try {
+    onProgress?.({stage:'download'})
+    onProgress?.({stage:'renderer'})
     ;[{ default: pdfMake }] = await Promise.all([
       import('pdfmake/build/pdfmake'),
     ])
@@ -43,9 +56,29 @@ export async function downloadInvoice(snapshot: InvoiceSnapshot): Promise<void> 
   let fontResponse: Response
   let bytes: ArrayBuffer
   try {
+    onProgress?.({stage:'font'})
     fontResponse = await fetch(`${import.meta.env.BASE_URL}fonts/${font.normalFile}`)
     if (!fontResponse.ok) throw new Error('HTTP error')
-    bytes = await fontResponse.arrayBuffer()
+    const contentLength = Number(fontResponse.headers.get('content-length') || 0)
+    if (fontResponse.body && typeof fontResponse.body.getReader === 'function') {
+      const reader = fontResponse.body.getReader()
+      const chunks: Uint8Array[] = []
+      let loaded = 0
+      while (true) {
+        const {done, value}=await reader.read()
+        if(done)break
+        chunks.push(value)
+        loaded += value.byteLength
+        onProgress?.({stage:'font', loaded, total: contentLength || undefined})
+      }
+      bytes = new Uint8Array(chunks.reduce((total, chunk)=>total+chunk.byteLength,0)).buffer
+      let offset=0
+      const target=new Uint8Array(bytes)
+      for(const chunk of chunks){target.set(chunk,offset);offset+=chunk.byteLength}
+    } else {
+      bytes=await fontResponse.arrayBuffer()
+      onProgress?.({stage:'font',loaded:bytes.byteLength,total:bytes.byteLength})
+    }
   } catch {
     throw new Error('PDF_FONT: asset load failed')
   }
@@ -55,6 +88,7 @@ export async function downloadInvoice(snapshot: InvoiceSnapshot): Promise<void> 
 
   let blob: Blob
   try {
+    onProgress?.({stage:'generating'})
     let binary = ''
     const chunk = new Uint8Array(bytes)
     for (let i = 0; i < chunk.length; i += 8192) {

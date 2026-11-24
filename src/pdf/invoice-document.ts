@@ -1,6 +1,7 @@
 import type { TDocumentDefinitions, TableCell } from 'pdfmake/interfaces'
 import { formatCad } from '../domain/money'
 import type { InvoiceSnapshot } from '../domain/invoice-snapshot'
+import { clampNoteToThreeLines } from '../domain/invoice-snapshot'
 
 export function snapshotToDocument(snapshot: InvoiceSnapshot): TDocumentDefinitions {
   const sender = snapshot.sender
@@ -20,11 +21,20 @@ export function snapshotToDocument(snapshot: InvoiceSnapshot): TDocumentDefiniti
     { text: 'Minutes' },
     { text: 'Actual charge (CAD)' },
   ]]
-  snapshot.lines.forEach((line) => body.push([
-    line.lessonDate,
-    String(line.minutes),
-    formatCad(line.chargeCents),
-  ]))
+  snapshot.lines.forEach((line) => {
+    body.push([
+      line.lessonDate,
+      String(line.minutes),
+      formatCad(line.chargeCents),
+    ])
+    if (snapshot.render.templateVersion === '2.0' && typeof line.note === 'string' && line.note.trim()) {
+      body.push([
+        { text: clampNoteToThreeLines(line.note), colSpan: 3, margin: [0, 2, 0, 4] },
+        '',
+        '',
+      ])
+    }
+  })
 
   return {
     pageSize: 'LETTER',
