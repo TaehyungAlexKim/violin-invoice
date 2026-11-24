@@ -16,6 +16,8 @@ dist-ssr
 !.env.example
 supabase/.temp/
 dist/
+test-results/
+playwright-report/
 *.pdf
 *.sql.gz
 

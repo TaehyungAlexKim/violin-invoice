@@ -110,3 +110,51 @@ export function lessonSaveError(error: unknown): string {
   }
   return 'Unable to save the lesson. Please try again.'
 }
+
+export type OperatorLookupResult =
+  | { status: 'allowed' }
+  | { status: 'denied' }
+  | { status: 'failure'; message: string }
+
+export async function isOperatorUserResult(
+  client: {
+    from(table: string): {
+      select(columns: string): {
+        eq(column: string, value: string): {
+          maybeSingle(): Promise<{ data: unknown; error: unknown }>
+        }
+      }
+    }
+  },
+  userId: string,
+): Promise<OperatorLookupResult> {
+  try {
+    const { data, error } = await client.from('app_operators')
+      .select('workspace_owner_id').eq('user_id', userId).maybeSingle()
+    if (error) return { status: 'failure', message: 'Unable to verify operator access. Please retry.' }
+    return data ? { status: 'allowed' } : { status: 'denied' }
+  } catch {
+    return { status: 'failure', message: 'Unable to verify operator access. Please retry.' }
+  }
+}
+
+export function allocateStableOperationKey(
+  currentKey: string,
+  currentIdentity: string,
+  nextIdentity: string,
+  createKey: () => string,
+): { key: string; identity: string } {
+  if (currentKey && currentIdentity === nextIdentity) {
+    return { key: currentKey, identity: currentIdentity }
+  }
+  return { key: createKey(), identity: nextIdentity }
+}
+
+export function reconcileConflictSuccess<T>(
+  conflict: unknown,
+  existing: T | null,
+): T | null {
+  const value = conflict as { code?: string } | null
+  if (value?.code === '23505' && existing) return existing
+  return null
+}

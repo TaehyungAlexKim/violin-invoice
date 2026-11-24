@@ -56,6 +56,7 @@ create table public.students (
   phone text check (phone is null or char_length(phone) <= 80),
   billing_address text check (billing_address is null or char_length(billing_address) <= 1000),
   memo text check (memo is null or char_length(memo) <= 4000),
+  archived_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -70,6 +71,7 @@ create table public.lessons (
   minutes smallint not null check (minutes between 1 and 1440),
   charge_cents integer not null check (charge_cents between 0 and 100000000),
   entry_key uuid not null,
+  note text check (note is null or char_length(btrim(note)) <= 300),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(owner_id, entry_key),
@@ -335,8 +337,9 @@ begin
       'sourceLessonId', v_lesson.id,
       'lessonDate', to_char(v_lesson.lesson_date, 'YYYY-MM-DD'),
       'minutes', v_lesson.minutes,
-      'chargeCents', v_lesson.charge_cents
-    );
+      'chargeCents', v_lesson.charge_cents,
+      'note', nullif(btrim(coalesce(v_lesson.note,'')),'')
+    ) - 'note';
   end loop;
   if jsonb_array_length(v_lines)=0 then
     raise exception using errcode='P0001', message='At least one unclaimed lesson is required.';

@@ -14,7 +14,26 @@ export function parseDateOnly(value: string): { year: number; month: number; day
 
 export function formatDateOnly(value: string): string {
   parseDateOnly(value)
-  return value
+  const { year, month, day } = parseDateOnly(value)
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'UTC',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(Date.UTC(year, month - 1, day)))
+}
+
+export function formatAuditTimestamp(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Vancouver',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
 }
 
 export function addCalendarDay(value: string): string {

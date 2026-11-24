@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap;
-select plan(21);
+select plan(26);
 
 insert into auth.users(id,email) values
  ('00000000-0000-4000-8001-000000000011','teacher@example.invalid'),
@@ -94,6 +94,34 @@ $$,'draft invoice deletion succeeds');
 select throws_ok($$
   delete from public.invoices where id='30000000-0000-4000-8001-000000000011'
 $$,'23514','Finalized invoices are immutable.','finalized invoice deletion rejected');
+select ok(
+  (select count(distinct entry_key)=3 from public.invoices),
+  'draft/finalized invoice rows have stable entry-key identities'
+);
+insert into public.invoices(owner_id,student_id,status,period_start,period_end,entry_key)
+values('00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000011','draft','2028-01-01','2028-01-31','70000000-0000-4000-8001-000000000011');
+select throws_ok($$
+  insert into public.invoices(owner_id,student_id,status,period_start,period_end,entry_key)
+  values('00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000011','draft','2028-02-01','2028-02-28','70000000-0000-4000-8001-000000000011')
+$$,'23505','duplicate key value violates unique constraint','duplicate draft entry key is rejected');
+
+-- Soft archive preserves existing lessons/invoices while rejecting new ownership.
+update public.students
+set archived_at=now()
+where id='10000000-0000-4000-8001-000000000011';
+select ok(
+  (select count(*)=2 from public.lessons where student_id='10000000-0000-4000-8001-000000000011')
+  and (select count(*)>=2 from public.invoices where student_id='10000000-0000-4000-8001-000000000011'),
+  'archive retains existing lessons and invoices'
+);
+select throws_ok($$
+  insert into public.lessons(owner_id,student_id,lesson_date,minutes,charge_cents,entry_key,note)
+  values('00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000011','2028-03-01',45,6000,gen_random_uuid(),'new note')
+$$,'23514','Archived students cannot have new lessons or invoices.','archived student rejects new lesson');
+select throws_ok($$
+  insert into public.invoices(owner_id,student_id,status,period_start,period_end)
+  values('00000000-0000-4000-8001-000000000011','10000000-0000-4000-8001-000000000011','draft','2028-03-01','2028-03-31')
+$$,'23514','Archived students cannot have new lessons or invoices.','archived student rejects draft invoice');
 
 select * from finish();
 rollback;

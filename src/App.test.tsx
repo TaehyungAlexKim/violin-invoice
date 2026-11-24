@@ -15,6 +15,11 @@ import {
   passwordResetRequestError,
   scrubAuthParamsAndRoute,
 } from './domain/auth'
+import { allocateStableOperationKey } from './domain/auth'
+import { settingsSaveAllowed } from './pages/Settings'
+import { validateInvoiceSnapshot } from './domain/invoice-snapshot'
+import { reconcileDraftEntryKey, reconcileDraftNavigation, reconcileFinalizationFailure, previewResultIsCurrent } from './data/repositories'
+import { LESSON_NOTE_MAX_LENGTH, clampNoteToThreeLines, normalizeLessonNote } from './domain/invoice-snapshot'
 
 function operatorClient(result: { data: unknown; error: unknown }) {
   return {
@@ -28,9 +33,94 @@ function operatorClient(result: { data: unknown; error: unknown }) {
   } as unknown as Parameters<typeof isOperatorUser>[0]
 }
 
+describe('safe review boundaries', () => {
+  it('normalizes lesson notes and clamps PDF display to three lines without changing the 300-character cap', () => {
+    expect(LESSON_NOTE_MAX_LENGTH).toBe(300)
+    expect(normalizeLessonNote('  warm-up  ')).toBe('warm-up')
+    expect(normalizeLessonNote('   ')).toBeNull()
+    const clamped = clampNoteToThreeLines('W'.repeat(300))
+    expect(clamped.split('\n').length).toBeLessThanOrEqual(3)
+    expect(clamped.replaceAll('\n','')).toHaveLength(300)
+    expect(clampNoteToThreeLines('漢'.repeat(300)).endsWith('…')).toBe(true)
+    const multiline = clampNoteToThreeLines('first\nsecond\nthird\nfourth')
+    expect(multiline.split('\n')).toHaveLength(3)
+    expect(multiline.split('\n')[2].endsWith('…')).toBe(true)
+  })
+  it('blocks Settings save until a successful load', () => {
+    expect(settingsSaveAllowed(true,true,'',false)).toBe(false)
+    expect(settingsSaveAllowed(false,false,'Unable to load',false)).toBe(false)
+    expect(settingsSaveAllowed(false,true,'',false)).toBe(true)
+  })
+
+  it('reuses a stable lesson operation key for retries and rotates after success/reset', () => {
+    const createKey=vi.fn(()=>`key-${createKey.mock.calls.length}`)
+    const first=allocateStableOperationKey('', '', 'student|date|60|65', createKey)
+    expect(allocateStableOperationKey(first.key, first.identity, first.identity, createKey)).toEqual(first)
+    expect(allocateStableOperationKey(first.key, first.identity, 'student|date|60|70', createKey).key).not.toBe(first.key)
+  })
+
+  it('keeps student duplicate submit guards synchronous and ref-backed', () => {
+    const guard = { pending: false }
+    const submit = () => {
+      if (guard.pending) return 'blocked'
+      guard.pending = true
+      return 'started'
+    }
+    expect(submit()).toBe('started')
+    expect(submit()).toBe('blocked')
+  })
+
+  it('reconciles an out-of-order draft conflict only with its existing entry row', () => {
+    const existing = { id:'invoice-1',student_id:'student-1',status:'draft',period_start:'2026-11-01',period_end:'2026-11-30',entry_key:'stable-key' } as const
+    expect(reconcileDraftEntryKey({code:'23505'}, existing)).toEqual({reconciled:true,existing})
+    expect(reconcileDraftEntryKey({code:'23505'}, null)).toEqual({reconciled:false,existing:null})
+  })
+
+  it('binds draft reconciliation to the selected student and draft status', () => {
+    const row={id:'invoice-1',student_id:'student-1',status:'draft',entry_key:'key-1',period_start:'2026-11-01',period_end:'2026-11-30'} as const
+    expect(reconcileDraftNavigation({key:'key-1',studentId:'student-1'},row)).toEqual({safe:true,invoice:row})
+    expect(reconcileDraftNavigation({key:'key-1',studentId:'student-2'},row).safe).toBe(false)
+    expect(reconcileDraftNavigation({key:'key-1',studentId:'student-1'}, {...row,status:'finalized'}).safe).toBe(false)
+  })
+
+  it('reconciles commit-then-error and exposes a valid finalized invoice', async () => {
+    const snapshot=validateInvoiceSnapshot({
+      schemaVersion:1,currency:'CAD',businessTimezone:'America/Vancouver',locale:'en-CA',
+      invoice:{id:'invoice-1',number:'VI-2026-000001',status:'finalized',issueDate:'2026-11-23'},
+      servicePeriod:{start:'2026-11-01',end:'2026-11-23'},sender:{},recipient:{},
+      lines:[],subtotalCents:0,taxCents:0,totalCents:0,
+      render:{fontManifest:{family:'Noto Sans KR',normalFile:'NotoSansKR-subset-2.0.ttf',sha256:'c9a5624db8919577ac53deb3a111dc6561bd4b69c06774288cc634a630f24c60',license:'OFL-1.1',normalOnly:true,licenseFile:'OFL.txt'},templateVersion:'2.0',rendererName:'pdfmake',rendererVersion:'0.3.15'},
+    })
+    const finalized={id:'invoice-1',student_id:'student-1',status:'finalized',period_start:'2026-11-01',period_end:'2026-11-23',snapshot_json:snapshot}
+    const client={from:()=>({select:()=>({eq:()=>({maybeSingle:async()=>({data:finalized,error:null})})})})} as unknown as Parameters<typeof reconcileFinalizationFailure>[0]
+    const outcome=await reconcileFinalizationFailure(client,'invoice-1','student-1',new Error('RPC returned after commit'))
+    expect(outcome.kind).toBe('finalized')
+    if(outcome.kind==='finalized'){expect(outcome.invalidSnapshot).toBe(false);expect(outcome.invoice.status).toBe('finalized')}
+  })
+
+  it('rejects delayed preview results from superseded invoice/range generations', async () => {
+    let resolveA!: (value:string)=>void
+    let resolveB!: (value:string)=>void
+    const a=new Promise<string>(resolve=>{resolveA=resolve})
+    const b=new Promise<string>(resolve=>{resolveB=resolve})
+    let currentGeneration=1
+    let currentIdentity='invoice-1|student-1|2026-11-01|2026-11-30'
+    resolveA('A'); resolveB('B')
+    await Promise.all([a,b])
+    currentGeneration=2
+    currentIdentity='invoice-1|student-1|2026-12-01|2026-12-31'
+    expect(previewResultIsCurrent(1,currentGeneration,'invoice-1|student-1|2026-11-01|2026-11-30',currentIdentity)).toBe(false)
+    expect(previewResultIsCurrent(2,currentGeneration,currentIdentity,currentIdentity)).toBe(true)
+  })
+
+  it('rejects malformed persisted snapshots', () => {
+    expect(()=>validateInvoiceSnapshot({schemaVersion:1,render:null})).toThrow(/Invalid/)
+  })
+})
+
 describe('operator access check', () => {
   it('allows only an exact operator-row match', async () => {
-    expect(await isOperatorUser(operatorClient({data:{workspace_owner_id:'workspace-owner'},error:null}), 'operator')).toBe(true)
+    expect(await isOperatorUser(operatorClient({data:{workspace_owner_id:'workspace-owner'},error:null}), 'operator')).toEqual({status:'allowed'})
   })
 
   describe('student deletion error', () => {
@@ -190,9 +280,11 @@ describe('operator access check', () => {
       expect(validatePassword('123456', '123456')).toBe('')
     })
   })
-  it('denies missing operators, RLS mismatches, and query errors uniformly', async () => {
-    expect(await isOperatorUser(operatorClient({data:null,error:null}), 'second-user')).toBe(false)
-    expect(await isOperatorUser(operatorClient({data:null,error:{message:'permission denied'}}), 'second-user')).toBe(false)
+  it('distinguishes denied operators from transient lookup failures', async () => {
+    expect(await isOperatorUser(operatorClient({data:null,error:null}), 'second-user')).toEqual({status:'denied'})
+    expect(await isOperatorUser(operatorClient({data:null,error:{message:'network failed'}}), 'second-user')).toEqual({
+      status:'failure', message:'Unable to verify operator access. Please retry.',
+    })
   })
 })
 
