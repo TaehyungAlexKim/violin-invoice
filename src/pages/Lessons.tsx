@@ -83,8 +83,11 @@ export function Lessons() {
     <label>Lesson date<input type="date" value={lessonDate} onChange={e=>setLessonDate(e.target.value)} required/></label>
     <label>Minutes<input type="number" min="1" max="1440" value={minutes} onChange={e=>setMinutes(e.target.value)} required/></label>
     <label>Actual charge (CAD)<input inputMode="decimal" value={amount} onChange={e=>setAmount(e.target.value)} required/></label>
-    <label>Lesson note <span>(optional, 300 characters)</span><textarea value={note} onChange={e=>setNote(e.target.value)} maxLength={300}/></label>
-    <button className="primary" type="submit" disabled={saving}>{saving?(editing?'Saving…':'Adding…'):editing?'Save lesson':'Add lesson'}</button>    {editing&&<button type="button" onClick={()=>{setEditing(null);setNote('')}}>Cancel edit</button>}
+    <label className="lesson-note-field"><span>Lesson note <small>(optional, 300 characters)</small></span><textarea value={note} onChange={e=>setNote(e.target.value)} maxLength={300}/></label>
+    <div className="lesson-form-actions">
+      <button className="primary" type="submit" disabled={saving}>{saving?(editing?'Saving…':'Adding…'):editing?'Save lesson':'Add lesson'}</button>
+      {editing&&<button type="button" onClick={()=>{setEditing(null);setNote('')}}>Cancel edit</button>}
+    </div>
   </form>{message&&<p role="status">{message}</p>}
   <div className="form-grid filter-grid card">
     <label>Student<select value={filterStudent} onChange={e=>setFilterStudent(e.target.value)}><option value="">All students</option>{students.map(s=><option value={s.id} key={s.id}>{s.name}</option>)}</select></label>

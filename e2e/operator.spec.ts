@@ -101,6 +101,30 @@ test('fixture-backed browser coverage: mobile operator, retry, duplicate, and in
   await expect(page.getByLabel('Student').first()).toBeVisible()
   await expect(page.getByRole('button', { name: 'Edit' })).toBeEnabled()
   await expect(page.getByRole('button', { name: 'Delete' })).toBeEnabled()
+  const lessonForm=page.locator('.lesson-form')
+  await page.setViewportSize({width:1280,height:800})
+  const desktopFields=await lessonForm.locator(':scope > label').evaluateAll(fields=>fields.map(field=>{
+    const rect=field.getBoundingClientRect()
+    return {x:rect.x,y:rect.y,width:rect.width,height:rect.height}
+  }))
+  expect(desktopFields.slice(0,4).every(field=>Math.abs(field.y-desktopFields[0].y)<1)).toBe(true)
+  expect(desktopFields[4].y).toBeGreaterThanOrEqual(desktopFields[0].y+desktopFields[0].height)
+  const desktopFormBox=await lessonForm.boundingBox()
+  expect(desktopFields[4].width).toBeGreaterThan(desktopFormBox!.width*0.9)
+  const desktopNoteBox=desktopFields[4]
+  const desktopActionBox=await lessonForm.locator('.lesson-form-actions').boundingBox()
+  expect(desktopActionBox!.y).toBeGreaterThanOrEqual(desktopNoteBox.y+desktopNoteBox.height)
+
+  await page.setViewportSize({width:390,height:800})
+  const mobileFields=await lessonForm.locator(':scope > label').evaluateAll(fields=>fields.map(field=>{
+    const rect=field.getBoundingClientRect()
+    return {x:rect.x,y:rect.y,height:rect.height}
+  }))
+  expect(mobileFields.every(field=>Math.abs(field.x-mobileFields[0].x)<1)).toBe(true)
+  for(let index=1;index<mobileFields.length;index++){
+    expect(mobileFields[index].y).toBeGreaterThanOrEqual(mobileFields[index-1].y+mobileFields[index-1].height)
+  }
+  await page.setViewportSize({width:375,height:812})
 
   await page.goto('http://127.0.0.1:4173/violin-invoice/#/invoices/invoice-1')
   await expect(page).toHaveURL(/#\/invoices\/invoice-1/)
